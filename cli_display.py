@@ -339,8 +339,9 @@ class CLIDisplay:
         self._live = Live(
             self._generate_layout(),
             console=self.console,
-            refresh_per_second=4,       # Faster refresh for menu responsiveness
-            screen=True,
+            refresh_per_second=2,       # Smooth refresh without flicker
+            screen=False,               # False = no screen clear, critical for SSH
+            auto_refresh=True,
         )
         self._live.start()
 
@@ -356,8 +357,13 @@ class CLIDisplay:
             # Process any pending keystrokes
             self._process_keystrokes()
 
-            # Update the display
-            self._live.update(self._generate_layout())
+            # Update the display (only needed when auto_refresh=False)
+            if not self._live.auto_refresh:
+                self._live.update(self._generate_layout())
+
+    def tick(self):
+        """Lightweight tick: only process keystrokes, no render."""
+        self._process_keystrokes()
 
     def shutdown(self):
         """Full cleanup - restore terminal, stop display."""

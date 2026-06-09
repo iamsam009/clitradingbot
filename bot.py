@@ -756,28 +756,27 @@ class TradingBot:
                 # Run one cycle (skip trading logic if paused)
                 self.run_cycle()
 
-                # Refresh display (also processes keyboard input)
+                # Process keystrokes + let auto_refresh handle rendering
                 try:
                     self.display.refresh()
                 except Exception:
                     pass  # Display errors shouldn't stop the bot
 
-                # Calculate sleep time (shorter poll when paused for responsive UI)
-                elapsed = time.time() - cycle_start
-                base_interval = 0.5 if self.paused else self.cfg.poll_interval_seconds
-                sleep_time = max(0.1, base_interval - elapsed)
+                # Sleep between cycles
+                base_interval = 1.0 if self.paused else self.cfg.poll_interval_seconds
+                sleep_time = max(0.2, base_interval - (time.time() - cycle_start))
 
-                # Sleep in small increments to allow quick shutdown + key processing
+                # Sleep in 0.5s chunks so we can process keystrokes and shutdown quickly
                 while sleep_time > 0 and self.running:
-                    time.sleep(min(0.2, sleep_time))
-                    sleep_time -= 0.2
-                    # Process keystrokes during sleep while paused
-                    if self.paused:
-                        self._process_actions()
-                        try:
-                            self.display.refresh()
-                        except Exception:
-                            pass
+                    chunk = min(0.5, sleep_time)
+                    time.sleep(chunk)
+                    sleep_time -= chunk
+                    self._process_actions()
+                    # Only process keystrokes during sleep, let auto_refresh render
+                    try:
+                        self.display.tick()
+                    except Exception:
+                        pass
 
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received")
