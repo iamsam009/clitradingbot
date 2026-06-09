@@ -153,6 +153,7 @@ class TradingBot:
         self.current_bb: Optional[BBResult] = None
         self.cycle_count: int = 0
         self.running: bool = True
+        self.paused: bool = False
         self.last_error: str = ""
 
         # Paper trading
@@ -569,6 +570,80 @@ class TradingBot:
             logger.warning("⚠️  EMERGENCY CLOSE: Closing all positions now!")
             self._close_position("MANUAL")
 
+    # ─── INTERACTIVE ACTIONS ───
+
+    def _process_actions(self):
+        """
+        Process any pending actions from the interactive CLI display.
+
+        Actions:
+          - "pause": Halt trading decisions (keep fetching data and updating display)
+          - "resume": Resume trading decisions
+          - "update_config": Apply a config change and rebuild dependent objects
+          - "reset_daily": Reset the risk manager's daily counters
+          - "shutdown": Graceful shutdown
+        """
+        for action_type, payload in self.display.pending_actions:
+            if action_type == "pause":
+                if not self.paused:
+                    self.paused = True
+                    logger.info("PAUSED TRADING by user")
+                    self.display.paused = True
+
+            elif action_type == "resume":
+                if self.paused:
+                    self.paused = False
+                    logger.info("RESUMED TRADING by user")
+                    self.display.paused = False
+
+            elif action_type == "update_config":
+                config_path = payload.get("path", "")
+                label = payload.get("label", "")
+                value = payload.get("value", "")
+                logger.info(f"Config updated by user: {label} -> {value} (path={config_path})")
+
+                # Rebuild strategy if strategy params changed
+                if config_path.startswith("strategy."):
+                    self.strategy = BollingerBandStrategy(self.cfg.strategy)
+                    logger.info(f"   Strategy rebuilt with new {label}")
+
+                # Rebuild risk manager if risk params changed
+                if config_path.startswith("risk."):
+                    old_lock = self.risk_manager._is_locked
+                    old_daily_pnl = self.risk_manager._daily_pnl_usdt
+                    old_trades = self.risk_manager._trades_today
+                    old_trade_log = self.risk_manager._trade_log
+                    old_counter = self.risk_manager._trade_counter
+                    self.risk_manager = RiskManager(self.cfg.risk)
+                    self.risk_manager._is_locked = old_lock
+                    self.risk_manager._daily_pnl_usdt = old_daily_pnl
+                    self.risk_manager._trades_today = old_trades
+                    self.risk_manager._trade_log = old_trade_log
+                    self.risk_manager._trade_counter = old_counter
+                    self.risk_manager._current_date = datetime.now(IST).strftime("%Y-%m-%d")
+                    logger.info(f"   Risk manager rebuilt with new {label}")
+
+                # If strategy trail_pct changed, update existing position's trailing stop
+                if config_path == "strategy.trail_pct" and self.position:
+                    if self.position.side == "LONG":
+                        self.position.trailing_stop = (
+                            self.position.highest_price * (1 - self.cfg.strategy.trail_pct)
+                        )
+                    else:
+                        self.position.trailing_stop = (
+                            self.position.lowest_price * (1 + self.cfg.strategy.trail_pct)
+                        )
+                    logger.info(f"   Position trailing stop recalculated: ${self.position.trailing_stop:,.2f}")
+
+            elif action_type == "reset_daily":
+                self.risk_manager._current_date = ""
+                self.risk_manager.check_and_reset_daily()
+                logger.info("Daily stats RESET by user")
+
+            elif action_type == "shutdown":
+                logger.info("Shutdown requested from interactive display")
+                self.running = False
+
     # ─── MAIN CYCLE ───
 
     def run_cycle(self):
@@ -576,8 +651,8 @@ class TradingBot:
         Execute one complete cycle of the bot:
         1. Fetch data
         2. Check session
-        3. Check exit conditions
-        4. Detect and execute entry signals
+        3. Check exit conditions (unless paused)
+        4. Detect and execute entry signals (unless paused)
         5. Update display
         """
         self.cycle_count += 1
@@ -585,11 +660,11 @@ class TradingBot:
         # 1. Daily reset check
         self.risk_manager.check_and_reset_daily()
 
-        # 2. Fetch data
+        # 2. Fetch data (always, even when paused — keep display alive)
         if not self.fetch_data():
             self.display.update_data(
                 last_error=self.last_error,
-                bot_status="ERROR (Data)",
+                bot_status="PAUSED (Data)" if self.paused else "ERROR (Data)",
             )
             return
 
@@ -597,16 +672,18 @@ class TradingBot:
         in_session, session_name = self.session_checker.is_in_session()
         session_info = f"{session_name} Session" if in_session else self.session_checker.next_session_info()
 
-        # 4. Check exit conditions (always, even outside session)
-        if self.position:
-            self.check_and_execute_exit()
+        # 4. TRADING LOGIC — skip if paused
+        if not self.paused:
+            # Check exit conditions (always, even outside session)
+            if self.position:
+                self.check_and_execute_exit()
 
-        # 5. Entry logic (only during session)
-        if in_session and self.position is None:
-            signal = self.strategy.detect_entry_signal()
-            if signal.signal != "NONE":
-                self.display.print_signal_detected(signal.signal, signal.reason)
-                self.execute_entry(signal)
+            # Entry logic (only during session)
+            if in_session and self.position is None:
+                signal = self.strategy.detect_entry_signal()
+                if signal.signal != "NONE":
+                    self.display.print_signal_detected(signal.signal, signal.reason)
+                    self.execute_entry(signal)
 
         # 6. Update display data
         self._update_display(in_session, session_info)
@@ -673,23 +750,34 @@ class TradingBot:
             try:
                 cycle_start = time.time()
 
-                # Run one cycle
+                # Process any pending interactive actions
+                self._process_actions()
+
+                # Run one cycle (skip trading logic if paused)
                 self.run_cycle()
 
-                # Refresh display
+                # Refresh display (also processes keyboard input)
                 try:
                     self.display.refresh()
                 except Exception:
                     pass  # Display errors shouldn't stop the bot
 
-                # Calculate sleep time
+                # Calculate sleep time (shorter poll when paused for responsive UI)
                 elapsed = time.time() - cycle_start
-                sleep_time = max(1, self.cfg.poll_interval_seconds - elapsed)
+                base_interval = 0.5 if self.paused else self.cfg.poll_interval_seconds
+                sleep_time = max(0.1, base_interval - elapsed)
 
-                # Sleep in small increments to allow quick shutdown
+                # Sleep in small increments to allow quick shutdown + key processing
                 while sleep_time > 0 and self.running:
-                    time.sleep(min(1, sleep_time))
-                    sleep_time -= 1
+                    time.sleep(min(0.2, sleep_time))
+                    sleep_time -= 0.2
+                    # Process keystrokes during sleep while paused
+                    if self.paused:
+                        self._process_actions()
+                        try:
+                            self.display.refresh()
+                        except Exception:
+                            pass
 
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received")
