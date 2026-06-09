@@ -99,6 +99,11 @@ class SharkExClient:
     """
     Direct REST API client for SharkEx exchange.
     Uses HMAC-SHA256 signing for authenticated endpoints.
+    
+    Public market data (OHLCV, ticker) is fetched from Binance via CCXT
+    as a fallback since SharkEx API routes are subject to change.
+    BTC/USDT pricing is universal across exchanges.
+    Trading operations (orders, balances) use SharkEx directly.
     """
 
     BASE_URL = "https://api.sharkexchange.in"
@@ -115,6 +120,19 @@ class SharkExClient:
             "Content-Type": "application/json",
             "X-API-KEY": self.api_key,
         })
+        
+        # CCXT Binance fallback for public market data
+        self._binance = None
+        try:
+            self._binance = ccxt.binance({
+                'enableRateLimit': True,
+                'options': {'defaultType': 'spot'},
+            })
+            self._binance.load_markets()
+            logger.info("SharkExClient: Binance CCXT fallback initialized for public data")
+        except Exception as e:
+            logger.warning(f"SharkExClient: Binance CCXT fallback unavailable ({e}). "
+                          "SharkEx public endpoints will be used directly.")
 
     def _sign(self, method: str, path: str, params: dict = None) -> str:
         """Generate HMAC-SHA256 signature"""
@@ -193,12 +211,25 @@ class SharkExClient:
                 return result
         return result
 
-    def fetch_ohlcv(self, timeframe: str = "5m", limit: int = 100, 
+    def fetch_ohlcv(self, timeframe: str = "5m", limit: int = 100,
                     since: int = None) -> List[List[float]]:
         """Fetch OHLCV (candlestick) data.
-        GET /api/v2/klines
+        Uses Binance CCXT as primary source (universal BTC/USDT pricing).
+        Falls back to SharkEx API if CCXT is unavailable.
         Returns: [[timestamp, open, high, low, close, volume], ...]
         """
+        # --- Primary: Binance CCXT ---
+        if self._binance:
+            try:
+                ohlcv = self._binance.fetch_ohlcv(
+                    self.symbol, timeframe=timeframe, limit=limit, since=since
+                )
+                if ohlcv and len(ohlcv) > 0:
+                    return ohlcv
+            except Exception as e:
+                logger.warning(f"Binance OHLCV fetch failed: {e}, trying SharkEx...")
+
+        # --- Fallback: SharkEx direct API ---
         path = "/api/v2/klines"
         params = {
             "market": self.market_symbol.lower(),
@@ -211,7 +242,6 @@ class SharkExClient:
         result = self._request("GET", path, params=params)
 
         if isinstance(result, list):
-            # Normalize kline format
             ohlcv = []
             for candle in result:
                 if isinstance(candle, list) and len(candle) >= 5:
@@ -221,7 +251,7 @@ class SharkExClient:
                     if isinstance(ts, str):
                         ts = int(ts) if ts.isdigit() else 0
                     ohlcv.append([
-                        int(ts) * 1000 if ts < 10000000000 else int(ts),  # ms
+                        int(ts) * 1000 if ts < 10000000000 else int(ts),
                         float(candle.get("open", candle.get("o", 0))),
                         float(candle.get("high", candle.get("h", 0))),
                         float(candle.get("low", candle.get("l", 0))),
@@ -234,7 +264,17 @@ class SharkExClient:
         return []
 
     def fetch_current_price(self) -> float:
-        """Fetch the last traded price for the symbol."""
+        """Fetch the last traded price for the symbol.
+        Uses Binance CCXT as primary source, falls back to SharkEx ticker.
+        """
+        if self._binance:
+            try:
+                ticker = self._binance.fetch_ticker(self.symbol)
+                if ticker and ticker.get('last'):
+                    return float(ticker['last'])
+            except Exception as e:
+                logger.warning(f"Binance ticker fetch failed: {e}, trying SharkEx...")
+
         ticker = self.fetch_ticker()
         if isinstance(ticker, dict):
             price = ticker.get("last", ticker.get("last_price", ticker.get("close", 0)))
