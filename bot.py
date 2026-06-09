@@ -783,8 +783,32 @@ def main():
         print("   set SHARKEX_API_KEY and SHARKEX_API_SECRET in .env")
         sys.exit(1)
 
-    # Create and run bot
+    # Create bot first so we can check exchange health
     bot = TradingBot(cfg)
+    
+    # Check if SharkEx private API is down and auto-switch to paper trading
+    if (not cfg.paper_trading
+        and cfg.exchange.exchange_name == "sharkex"
+        and isinstance(bot.exchange, SharkExClient)):
+        _ = bot.exchange.fetch_balance()  # Triggers private API health check
+        status = bot.exchange.private_api_status
+        if not status["available"]:
+            logger.warning("=" * 60)
+            logger.warning("⚠️  SHARKEX PRIVATE API IS UNAVAILABLE!")
+            logger.warning(f"   Reason: {status['reason']}")
+            logger.warning("   Auto-switching to PAPER TRADING mode.")
+            logger.warning("   The bot will run with simulated balances and trades.")
+            logger.warning("   Public market data is fetched from Binance CCXT.")
+            logger.warning("=" * 60)
+            bot.cfg.paper_trading = True
+            # Also print to CLI for visibility
+            print("\n" + "=" * 70)
+            print("⚠️  SHARKEX PRIVATE API OFFLINE - PAPER TRADING ENABLED")
+            print("=" * 70)
+            print(f"   Reason: {status['reason'][:120]}...")
+            print("   Bot continues with simulated execution.")
+            print("=" * 70 + "\n")
+            time.sleep(3)
 
     try:
         bot.run()

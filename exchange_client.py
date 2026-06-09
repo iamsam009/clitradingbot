@@ -121,6 +121,12 @@ class SharkExClient:
             "X-API-KEY": self.api_key,
         })
         
+        # Private API availability tracking
+        # SharkEx API is currently undergoing migration from /api/v2 HMAC to /v1 JWT.
+        # If all signed endpoints return 404/401, we stop calling them to avoid spam.
+        self._private_api_available: bool = True
+        self._private_api_fail_reason: str = ""
+        
         # CCXT Binance fallback for public market data
         self._binance = None
         try:
@@ -133,6 +139,14 @@ class SharkExClient:
         except Exception as e:
             logger.warning(f"SharkExClient: Binance CCXT fallback unavailable ({e}). "
                           "SharkEx public endpoints will be used directly.")
+
+    @property
+    def private_api_status(self) -> dict:
+        """Return private API health status for bot.py to check."""
+        return {
+            "available": self._private_api_available,
+            "reason": self._private_api_fail_reason,
+        }
 
     def _sign(self, method: str, path: str, params: dict = None) -> str:
         """Generate HMAC-SHA256 signature"""
@@ -171,6 +185,25 @@ class SharkExClient:
                 logger.warning("Rate limited! Waiting 2 seconds...")
                 time.sleep(2)
                 return self._request(method, path, params, data, signed)
+            
+            # Detect SharkEx API migration: 404/401 on signed endpoints means
+            # the private API is unavailable. Disable future calls to avoid spam.
+            if signed and resp.status_code in (404, 401):
+                if self._private_api_available:
+                    reason = resp.text[:200] if resp.text else f"HTTP {resp.status_code}"
+                    self._private_api_available = False
+                    self._private_api_fail_reason = (
+                        f"SharkEx private API returned {resp.status_code} for {method} {path}. "
+                        f"API may have been migrated to /v1/ with JWT auth. "
+                        f"Response: {reason}"
+                    )
+                    logger.warning(self._private_api_fail_reason)
+                    logger.warning(
+                        "SharkEx private API is UNAVAILABLE. "
+                        "Switching to safe mode: balance/order operations will return defaults. "
+                        "Use --paper flag or set PAPER_TRADING=true for paper trading."
+                    )
+                return {"error": "private_api_unavailable", "reason": self._private_api_fail_reason}
 
             resp.raise_for_status()
             
@@ -181,6 +214,21 @@ class SharkExClient:
             return result
 
         except requests.exceptions.RequestException as e:
+            # Don't re-log private API errors if already marked unavailable
+            err_str = str(e)
+            if signed and self._private_api_available and ("404" in err_str or "401" in err_str):
+                self._private_api_available = False
+                self._private_api_fail_reason = (
+                    f"SharkEx private API unreachable [{method} {path}]: {err_str[:200]}. "
+                    f"API may have been migrated."
+                )
+                logger.warning(self._private_api_fail_reason)
+                logger.warning(
+                    "SharkEx private API is UNAVAILABLE. "
+                    "Balance/order operations will return safe defaults."
+                )
+                return {"error": "private_api_unavailable", "reason": self._private_api_fail_reason}
+            
             logger.error(f"SharkEx API error [{method} {path}]: {e}")
             return {"error": str(e)}
         except json.JSONDecodeError:
@@ -290,11 +338,19 @@ class SharkExClient:
     def fetch_balance(self) -> dict:
         """Fetch account balances.
         GET /api/v2/account/balances
+        
+        Returns empty dict if private API is unavailable.
         """
+        if not self._private_api_available:
+            return {}
+        
         path = "/api/v2/account/balances"
         result = self._request("GET", path, signed=True)
         
         if isinstance(result, dict):
+            if result.get("error") == "private_api_unavailable":
+                return {}
+            
             balances = {}
             for currency, details in result.items():
                 if isinstance(details, dict):
@@ -334,7 +390,12 @@ class SharkExClient:
         Args:
             side: 'buy' or 'sell'
             quantity: Amount in base currency (BTC)
+        
+        Returns None if private API is unavailable.
         """
+        if not self._private_api_available:
+            return None
+        
         path = "/api/v2/orders"
         data = {
             "market": self.market_symbol.lower(),
@@ -362,7 +423,7 @@ class SharkExClient:
         logger.error(f"Failed to create market order: {result}")
         return None
 
-    def create_stop_order(self, side: str, quantity: float, 
+    def create_stop_order(self, side: str, quantity: float,
                           stop_price: float, limit_price: float = None) -> Optional[Order]:
         """Create a stop-loss order (stop-market or stop-limit).
         POST /api/v2/orders
@@ -372,7 +433,12 @@ class SharkExClient:
             quantity: Amount in base currency
             stop_price: Trigger/stop price
             limit_price: Optional limit price (for stop-limit orders)
+        
+        Returns None if private API is unavailable.
         """
+        if not self._private_api_available:
+            return None
+        
         path = "/api/v2/orders"
         data = {
             "market": self.market_symbol.lower(),
@@ -428,7 +494,12 @@ class SharkExClient:
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an existing order.
         DELETE /api/v2/order
+        
+        Returns False if private API is unavailable.
         """
+        if not self._private_api_available:
+            return False
+        
         path = "/api/v2/order/delete"
         params = {"id": order_id}
 
@@ -445,7 +516,12 @@ class SharkExClient:
     def fetch_order(self, order_id: str) -> Optional[Order]:
         """Fetch a specific order by ID.
         GET /api/v2/order
+        
+        Returns None if private API is unavailable.
         """
+        if not self._private_api_available:
+            return None
+        
         path = "/api/v2/order"
         params = {"id": order_id}
 

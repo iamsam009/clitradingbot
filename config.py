@@ -100,6 +100,12 @@ class BotConfig:
         # Exchange selection
         print("\n📡 EXCHANGE SETUP")
         print("-" * 40)
+        print("\n  ⚠️  NOTE: SharkEx API is currently undergoing migration")
+        print("  (API routes changed from /api/v2 to /v1 with JWT auth).")
+        print("  If SharkEx private API is down, the bot auto-switches to")
+        print("  PAPER TRADING with Binance CCXT for live market data.")
+        print("  Binance Futures Testnet is fully operational.\n")
+        
         ex_choice = input("Exchange [sharkex / binance_futures_testnet] (default: sharkex): ").strip().lower()
         if ex_choice == "binance_futures_testnet":
             cfg.exchange.exchange_name = "binance"
@@ -111,6 +117,7 @@ class BotConfig:
             cfg.exchange.long_only = True
             cfg.exchange.symbol = "BTC/USDT"
             print("  -> Using SharkEx (Spot, Long Only)")
+            print("  -> If SharkEx API is unavailable, paper trading will be used automatically.")
 
         cfg.exchange.api_key = input("API Key: ").strip()
         cfg.exchange.api_secret = input("API Secret: ").strip()
