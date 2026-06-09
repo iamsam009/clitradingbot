@@ -1,6 +1,5 @@
 # clitradingbot - 5-Minute Bollinger Band Reversal Bot for SharkEx
 # Requirements
-ccxt>=4.2.0
 pandas>=2.0.0
 numpy>=1.24.0
 rich>=13.0.0

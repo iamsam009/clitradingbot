@@ -1,10 +1,9 @@
 """
-bot.py - Bollinger Band Reversal Trading Bot (Main Engine)
+bot.py - Bollinger Band Reversal Trading Bot (Main Engine, 24/7)
 
 Orchestrates all modules:
-- Exchange connection & data fetching
-- Session checking (IST trading windows)
-- Strategy signal detection
+- SharkEx v1 exchange connection & data fetching
+- Strategy signal detection (Bollinger Band reversal)
 - Order execution & trailing stop management
 - Risk management enforcement
 - Live CLI display
@@ -12,6 +11,7 @@ Orchestrates all modules:
 Usage:
     python bot.py          # Interactive setup (asks for API keys)
     python bot.py --paper  # Paper trading mode (no real orders)
+    python bot.py --no-interactive  # Use .env or defaults, no prompts
 """
 
 import os
@@ -20,16 +20,15 @@ import time
 import signal
 import logging
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Dict, Any
 
 import pytz
 
-from config import BotConfig, SessionConfig
+from config import BotConfig
 from exchange_client import (
     create_exchange_client,
     SharkExClient,
-    BinanceFuturesClient,
     Position,
     OrderSide,
     Order,
@@ -40,94 +39,9 @@ from risk_manager import RiskManager, TradeRecord
 from cli_display import CLIDisplay
 
 # ─── Logging Setup ───
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("bot.log", encoding="utf-8"),
-    ],
-)
 logger = logging.getLogger("bot")
 
 IST = pytz.timezone("Asia/Kolkata")
-
-
-# =============================================================================
-# Session Checker
-# =============================================================================
-
-class SessionChecker:
-    """
-    Checks if the current IST time falls within allowed trading windows.
-    Windows:
-      Morning:   09:30 - 12:00
-      Afternoon: 13:00 - 15:30
-      Evening:   19:00 - 22:00
-    """
-
-    def __init__(self, cfg: SessionConfig):
-        self.cfg = cfg
-
-    def _parse_time(self, time_str: str) -> datetime:
-        """Parse 'HH:MM' string to a datetime.time object."""
-        h, m = map(int, time_str.split(":"))
-        return datetime.now(IST).replace(hour=h, minute=m, second=0, microsecond=0)
-
-    def is_in_session(self) -> tuple[bool, str]:
-        """
-        Check if current time is within any trading session.
-        
-        Returns:
-            (is_in_session: bool, session_name: str)
-        """
-        now = datetime.now(IST)
-
-        # Morning session
-        morning_start = self._parse_time(self.cfg.morning_start)
-        morning_end = self._parse_time(self.cfg.morning_end)
-        if morning_start <= now <= morning_end:
-            return True, "Morning"
-
-        # Afternoon session
-        afternoon_start = self._parse_time(self.cfg.afternoon_start)
-        afternoon_end = self._parse_time(self.cfg.afternoon_end)
-        if afternoon_start <= now <= afternoon_end:
-            return True, "Afternoon"
-
-        # Evening session
-        evening_start = self._parse_time(self.cfg.evening_start)
-        evening_end = self._parse_time(self.cfg.evening_end)
-        if evening_start <= now <= evening_end:
-            return True, "Evening"
-
-        return False, "Outside"
-
-    def next_session_info(self) -> str:
-        """Get info about the next upcoming session."""
-        now = datetime.now(IST)
-
-        sessions = [
-            ("Morning", self._parse_time(self.cfg.morning_start)),
-            ("Afternoon", self._parse_time(self.cfg.afternoon_start)),
-            ("Evening", self._parse_time(self.cfg.evening_start)),
-        ]
-
-        for name, start in sessions:
-            if now < start:
-                wait = start - now
-                return f"Next: {name} at {start.strftime('%H:%M')} IST (in {wait.seconds // 60}m)"
-
-        # All sessions passed - next is tomorrow morning
-        tomorrow = now + timedelta(days=1)
-        next_start = tomorrow.replace(
-            hour=int(self.cfg.morning_start.split(":")[0]),
-            minute=int(self.cfg.morning_start.split(":")[1]),
-            second=0, microsecond=0,
-        )
-        wait = next_start - now
-        return f"Next: Tomorrow Morning at {self.cfg.morning_start} IST (in {wait.seconds // 3600}h {wait.seconds % 3600 // 60}m)"
 
 
 # =============================================================================
@@ -137,6 +51,7 @@ class SessionChecker:
 class TradingBot:
     """
     Main bot class that orchestrates the entire trading system.
+    Runs 24/7 — no session time restrictions.
     """
 
     def __init__(self, cfg: BotConfig):
@@ -144,7 +59,6 @@ class TradingBot:
         self.exchange = create_exchange_client(cfg)
         self.strategy = BollingerBandStrategy(cfg.strategy)
         self.risk_manager = RiskManager(cfg.risk)
-        self.session_checker = SessionChecker(cfg.session)
         self.display = CLIDisplay(cfg)
 
         # State
@@ -185,7 +99,7 @@ class TradingBot:
         try:
             # Fetch OHLCV
             ohlcv = self.exchange.fetch_ohlcv(
-                timeframe=self.cfg.exchange.timeframe,
+                timeframe=self.cfg.strategy.candle_tf,
                 limit=self.cfg.strategy.data_window,
             )
             if not ohlcv or len(ohlcv) < self.cfg.strategy.bb_period:
@@ -240,17 +154,13 @@ class TradingBot:
         if signal.signal == "NONE":
             return False
 
-        if signal.signal == "SHORT" and self.cfg.exchange.long_only:
-            logger.info("SHORT signal ignored (Long Only mode)")
-            return False
-
         # Check risk limits
         if not self.risk_manager.can_enter_new_trade():
             logger.warning(f"Cannot enter: {self.risk_manager.lock_reason}")
             return False
 
         # Calculate position size
-        trade_usdt = self.cfg.trade_size_usdt
+        trade_usdt = self.cfg.risk.trade_size_inr / self.cfg.risk.usd_inr_rate
         quantity = trade_usdt / signal.candle_close
 
         # Round quantity to appropriate precision
@@ -648,12 +558,11 @@ class TradingBot:
 
     def run_cycle(self):
         """
-        Execute one complete cycle of the bot:
+        Execute one complete cycle of the bot (24/7):
         1. Fetch data
-        2. Check session
-        3. Check exit conditions (unless paused)
-        4. Detect and execute entry signals (unless paused)
-        5. Update display
+        2. Check exit conditions (unless paused)
+        3. Detect and execute entry signals (unless paused)
+        4. Update display
         """
         self.cycle_count += 1
 
@@ -668,27 +577,23 @@ class TradingBot:
             )
             return
 
-        # 3. Check session
-        in_session, session_name = self.session_checker.is_in_session()
-        session_info = f"{session_name} Session" if in_session else self.session_checker.next_session_info()
-
-        # 4. TRADING LOGIC — skip if paused
+        # 3. TRADING LOGIC — skip if paused
         if not self.paused:
-            # Check exit conditions (always, even outside session)
+            # Check exit conditions (always)
             if self.position:
                 self.check_and_execute_exit()
 
-            # Entry logic (only during session)
-            if in_session and self.position is None:
+            # Entry logic (24/7 — no session restrictions)
+            if self.position is None:
                 signal = self.strategy.detect_entry_signal()
                 if signal.signal != "NONE":
                     self.display.print_signal_detected(signal.signal, signal.reason)
                     self.execute_entry(signal)
 
-        # 6. Update display data
-        self._update_display(in_session, session_info)
+        # 4. Update display data
+        self._update_display()
 
-    def _update_display(self, in_session: bool, session_info: str):
+    def _update_display(self):
         """Prepare data and push to the CLI display."""
         balances = self.fetch_balances()
 
@@ -697,7 +602,7 @@ class TradingBot:
 
         # Get latest signal info
         signal = self.strategy.detect_entry_signal()
-        
+
         self.display.update_data(
             current_price=self.current_price,
             balance=balances,
@@ -706,8 +611,6 @@ class TradingBot:
             signal=signal.signal,
             signal_reason=signal.reason,
             last_signal_distance=signal.near_distance_pct,
-            in_session=in_session,
-            session_info=session_info,
             bot_status="RUNNING" if self.running else "STOPPING",
             cycle_count=self.cycle_count,
             last_error=self.last_error,
@@ -723,17 +626,16 @@ class TradingBot:
         logger.info("=" * 60)
         logger.info("🚀 BOLLINGER BAND REVERSAL BOT STARTING")
         logger.info("=" * 60)
-        logger.info(f"Exchange: {self.cfg.exchange.exchange_name}")
+        logger.info(f"Exchange: SharkEx v1")
         logger.info(f"Symbol: {self.cfg.exchange.symbol}")
-        logger.info(f"Timeframe: {self.cfg.exchange.timeframe}")
-        logger.info(f"Long Only: {self.cfg.exchange.long_only}")
+        logger.info(f"Timeframe: {self.cfg.strategy.candle_tf}")
         logger.info(f"Paper Trading: {self.cfg.paper_trading}")
         logger.info(f"Trade Size: ₹{self.cfg.risk.trade_size_inr:,.0f}")
         logger.info(f"Max Daily Loss: ₹{self.cfg.risk.max_daily_loss_inr:,.0f}")
         logger.info(f"Max Trades/Day: {self.cfg.risk.max_trades_per_day}")
-        logger.info(f"Poll Interval: {self.cfg.poll_interval_seconds}s")
+        logger.info(f"Poll Interval: {self.cfg.poll_interval_sec}s")
         logger.info(f"BB Period: {self.cfg.strategy.bb_period} | "
-                    f"StdDev: {self.cfg.strategy.bb_std_dev} | "
+                    f"StdDev: {self.cfg.strategy.bb_stddev} | "
                     f"Near: {self.cfg.strategy.near_threshold*100:.1f}% | "
                     f"Trail: {self.cfg.strategy.trail_pct*100:.1f}%")
         logger.info("=" * 60)
@@ -763,7 +665,7 @@ class TradingBot:
                     pass  # Display errors shouldn't stop the bot
 
                 # Sleep between cycles
-                base_interval = 1.0 if self.paused else self.cfg.poll_interval_seconds
+                base_interval = 1.0 if self.paused else self.cfg.poll_interval_sec
                 sleep_time = max(0.2, base_interval - (time.time() - cycle_start))
 
                 # Sleep in 0.5s chunks so we can process keystrokes and shutdown quickly
@@ -819,9 +721,9 @@ class TradingBot:
         print("\n" + "=" * 70)
         print("   🤖 BOLLINGER BAND REVERSAL BOT - LIVE")
         print("=" * 70)
-        print(f"   Exchange: {self.cfg.exchange.exchange_name} | "
+        print(f"   Exchange: SharkEx v1 | "
               f"Symbol: {self.cfg.exchange.symbol} | "
-              f"TF: {self.cfg.exchange.timeframe}")
+              f"TF: {self.cfg.strategy.candle_tf}")
         print(f"   Trade Size: ₹{self.cfg.risk.trade_size_inr:,.0f} | "
               f"Max Loss: ₹{self.cfg.risk.max_daily_loss_inr:,.0f} | "
               f"Max Trades: {self.cfg.risk.max_trades_per_day}")
@@ -837,7 +739,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="5-Minute Bollinger Band Reversal Bot for SharkEx/Binance"
+        description="5-Minute Bollinger Band Reversal Bot for SharkEx"
     )
     parser.add_argument(
         "--paper", action="store_true",
@@ -870,32 +772,8 @@ def main():
         print("   set SHARKEX_API_KEY and SHARKEX_API_SECRET in .env")
         sys.exit(1)
 
-    # Create bot first so we can check exchange health
+    # Create bot
     bot = TradingBot(cfg)
-    
-    # Check if SharkEx private API is down and auto-switch to paper trading
-    if (not cfg.paper_trading
-        and cfg.exchange.exchange_name == "sharkex"
-        and isinstance(bot.exchange, SharkExClient)):
-        _ = bot.exchange.fetch_balance()  # Triggers private API health check
-        status = bot.exchange.private_api_status
-        if not status["available"]:
-            logger.warning("=" * 60)
-            logger.warning("⚠️  SHARKEX PRIVATE API IS UNAVAILABLE!")
-            logger.warning(f"   Reason: {status['reason']}")
-            logger.warning("   Auto-switching to PAPER TRADING mode.")
-            logger.warning("   The bot will run with simulated balances and trades.")
-            logger.warning("   Public market data is fetched from Binance CCXT.")
-            logger.warning("=" * 60)
-            bot.cfg.paper_trading = True
-            # Also print to CLI for visibility
-            print("\n" + "=" * 70)
-            print("⚠️  SHARKEX PRIVATE API OFFLINE - PAPER TRADING ENABLED")
-            print("=" * 70)
-            print(f"   Reason: {status['reason'][:120]}...")
-            print("   Bot continues with simulated execution.")
-            print("=" * 70 + "\n")
-            time.sleep(3)
 
     try:
         bot.run()

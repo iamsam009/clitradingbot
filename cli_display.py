@@ -216,10 +216,10 @@ MENU_ENTRIES: List[MenuEntry] = [
      lambda cfg: str(cfg.strategy.bb_period),
      lambda cfg: f"{cfg.strategy.bb_period}",
      lambda cfg, v: setattr(cfg.strategy, 'bb_period', int(v))),
-    ("2", "BB Std Dev",          "strategy.bb_std_dev",
-     lambda cfg: str(cfg.strategy.bb_std_dev),
-     lambda cfg: f"{cfg.strategy.bb_std_dev:.1f}",
-     lambda cfg, v: setattr(cfg.strategy, 'bb_std_dev', float(v))),
+    ("2", "BB Std Dev",          "strategy.bb_stddev",
+      lambda cfg: str(cfg.strategy.bb_stddev),
+      lambda cfg: f"{cfg.strategy.bb_stddev:.1f}",
+      lambda cfg, v: setattr(cfg.strategy, 'bb_stddev', float(v))),
     ("3", "Near Threshold %",    "strategy.near_threshold",
      lambda cfg: str(cfg.strategy.near_threshold * 100),
      lambda cfg: f"{cfg.strategy.near_threshold * 100:.1f}%",
@@ -246,10 +246,10 @@ MENU_ENTRIES: List[MenuEntry] = [
      lambda cfg: f"{cfg.risk.max_trades_per_day}",
      lambda cfg, v: setattr(cfg.risk, 'max_trades_per_day', int(v))),
     # Other
-    ("9", "Poll Interval (s)",   "poll_interval_seconds",
-     lambda cfg: str(cfg.poll_interval_seconds),
-     lambda cfg: f"{cfg.poll_interval_seconds}s",
-     lambda cfg, v: setattr(cfg, 'poll_interval_seconds', int(v))),
+    ("9", "Poll Interval (s)",   "poll_interval_sec",
+      lambda cfg: str(cfg.poll_interval_sec),
+      lambda cfg: f"{cfg.poll_interval_sec}s",
+      lambda cfg, v: setattr(cfg, 'poll_interval_sec', int(v))),
 ]
 
 
@@ -293,8 +293,6 @@ class CLIDisplay:
         self.signal: str = "NONE"
         self.signal_reason: str = ""
         self.last_signal_distance: float = 0.0
-        self.in_session: bool = False
-        self.session_info: str = ""
         self.bot_status: str = "IDLE"
         self.cycle_count: int = 0
         self.last_error: str = ""
@@ -339,9 +337,10 @@ class CLIDisplay:
         self._live = Live(
             self._generate_layout(),
             console=self.console,
-            refresh_per_second=2,       # Smooth refresh without flicker
+            refresh_per_second=4,       # Smooth but not excessive
             screen=False,               # False = no screen clear, critical for SSH
-            auto_refresh=True,
+            auto_refresh=False,         # Manual refresh — only when data changes
+            transient=False,
         )
         self._live.start()
 
@@ -357,9 +356,8 @@ class CLIDisplay:
             # Process any pending keystrokes
             self._process_keystrokes()
 
-            # Update the display (only needed when auto_refresh=False)
-            if not self._live.auto_refresh:
-                self._live.update(self._generate_layout())
+            # Always update — Rich diffs internally to minimize redraw
+            self._live.update(self._generate_layout(), refresh=True)
 
     def tick(self):
         """Lightweight tick: only process keystrokes, no render."""
@@ -732,7 +730,6 @@ class CLIDisplay:
         status_color = "green" if self.bot_status == "RUNNING" else (
             "red" if "ERROR" in self.bot_status else "yellow"
         )
-        session_color = "green" if self.in_session else "dim"
 
         text = Text()
         text.append(" 🤖 ", style="bold")
@@ -746,8 +743,7 @@ class CLIDisplay:
             text.append("⏸️ PAUSED", style="bold bright_red")
 
         text.append("  |  ", style="dim")
-        text.append(f"Session: ", style="dim")
-        text.append(f"{'● TRADING' if self.in_session else '○ OUTSIDE'}", style=f"bold {session_color}")
+        text.append("24/7 LIVE", style="bold green")
         text.append("  |  ", style="dim")
         text.append(f"{now.strftime('%Y-%m-%d %H:%M:%S')} IST", style="bold white")
         text.append("  |  ", style="dim")
@@ -852,16 +848,16 @@ class CLIDisplay:
 
         lines = []
         lines.append(f"  BB Period:        {st.bb_period}")
-        lines.append(f"  BB Std Dev:       {st.bb_std_dev}")
+        lines.append(f"  BB Std Dev:       {st.bb_stddev}")
         lines.append(f"  Near Threshold:   {st.near_threshold*100:.1f}%")
         lines.append(f"  Trail Stop:       {st.trail_pct*100:.1f}%")
         lines.append(f"  Trade Size:       ₹{rk.trade_size_inr:,.0f}")
         lines.append(f"  USD/INR Rate:     ₹{rk.usd_inr_rate}")
         lines.append(f"  Max Daily Loss:   ₹{rk.max_daily_loss_inr:,.0f}")
         lines.append(f"  Max Trades/Day:   {rk.max_trades_per_day}")
-        lines.append(f"  Poll Interval:    {self.cfg.poll_interval_seconds}s")
-        lines.append(f"  Exchange:         {self.cfg.exchange.exchange_name}")
-        lines.append(f"  Long Only:        {'Yes' if self.cfg.exchange.long_only else 'No'}")
+        lines.append(f"  Poll Interval:    {self.cfg.poll_interval_sec}s")
+        lines.append(f"  Exchange:         SharkEx v1")
+        lines.append(f"  Strategy:         24/7 BB Reversal")
 
         text = Text("\n".join(lines), style="cyan")
         return Panel(text, title="⚙️ Strategy Config", border_style="magenta",
@@ -995,15 +991,8 @@ class CLIDisplay:
         text.append("│  ", style="dim")
 
         text.append(f"Cycle: #{self.cycle_count}  |  ", style="dim")
-        text.append(f"Interval: {self.cfg.poll_interval_seconds}s  |  ", style="dim")
-
-        ses = self.cfg.session
-        text.append(
-            f"Sessions: {ses.morning_start}-{ses.morning_end}, "
-            f"{ses.afternoon_start}-{ses.afternoon_end}, "
-            f"{ses.evening_start}-{ses.evening_end} IST",
-            style="dim"
-        )
+        text.append(f"Interval: {self.cfg.poll_interval_sec}s  |  ", style="dim")
+        text.append(f"24/7 Trading | BB({self.cfg.strategy.bb_period}, {self.cfg.strategy.bb_stddev}σ)  ", style="dim")
 
         # Flash message (pause/resume notification)
         if self._menu_message and time.time() - self._menu_msg_time < 2.5 and not self._menu_mode:

@@ -97,7 +97,7 @@ class BollingerBandStrategy:
     def _add_bollinger_bands(self, df: pd.DataFrame):
         """Add Bollinger Band columns to the DataFrame."""
         period = self.cfg.bb_period
-        std_dev = self.cfg.bb_std_dev
+        std_dev = self.cfg.bb_stddev
 
         # Middle band = 20-period SMA
         df["bb_sma"] = df["close"].rolling(window=period).mean()

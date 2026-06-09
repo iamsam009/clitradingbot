@@ -1,732 +1,684 @@
 """
-exchange_client.py - SharkEx Exchange API Wrapper
+Exchange client module - Pure SharkEx API v1 integration.
+Uses HMAC-SHA256 signature authentication as per SharkEx documentation:
+  https://docs.sharkexchange.in/
+Base URL: https://api.sharkexchange.in/v1/
 
-Handles all communication with SharkEx (spot) exchange.
-Uses direct REST API calls with HMAC-SHA256 signing.
-Reference: https://docs.sharkexchange.in/#change-log
-
-For Binance Futures Testnet, uses CCXT library.
+Auth rules:
+  - GET requests:  sign sorted query_string (including timestamp) -> headers: api-key, signature
+  - POST/PUT/DELETE: sign JSON.stringify(body with timestamp) -> headers: api-key, signature
+  - Public /v1/market/* endpoints: no auth required
 """
 
-import time
-import hmac
 import hashlib
+import hmac
 import json
 import logging
-import urllib.parse
-from typing import Optional, Dict, List, Any, Tuple
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode, urljoin
 
 import requests
-import ccxt
 
 from config import BotConfig
 
-logger = logging.getLogger("exchange_client")
+logger = logging.getLogger(__name__)
 
-
-# =============================================================================
-# Data Classes
-# =============================================================================
-
-class OrderSide(str, Enum):
-    BUY = "buy"
-    SELL = "sell"
+BASE_URL = "https://api.sharkexchange.in"
 
 
 class OrderType(str, Enum):
-    MARKET = "market"
-    LIMIT = "limit"
-    STOP_MARKET = "stop_market"
-    STOP_LIMIT = "stop_limit"
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+    STOP_MARKET = "STOP_MARKET"
+
+
+class OrderSide(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
 
 
 class OrderStatus(str, Enum):
-    OPEN = "open"
-    FILLED = "filled"
-    CANCELLED = "cancelled"
-    PARTIALLY_FILLED = "partial"
-    REJECTED = "rejected"
+    NEW = "NEW"
+    FILLED = "FILLED"
+    CANCELED = "CANCELED"
+    REJECTED = "REJECTED"
 
 
 @dataclass
 class Order:
-    id: str
-    symbol: str
-    side: OrderSide
-    order_type: OrderType
+    """Represents an exchange order."""
+    order_id: str
+    client_order_id: str = ""
+    symbol: str = ""
+    side: str = ""
+    order_type: str = ""
     price: float = 0.0
-    amount: float = 0.0
-    filled: float = 0.0
-    remaining: float = 0.0
-    status: OrderStatus = OrderStatus.OPEN
-    timestamp: float = 0.0
-    average_price: float = 0.0
+    stop_price: float = 0.0
+    quantity: float = 0.0
+    executed_qty: float = 0.0
+    status: str = ""
+    avg_price: float = 0.0
+    raw: Optional[dict] = None
+
+    def __post_init__(self):
+        if self.raw is None:
+            self.raw = {}
+
+    @property
+    def is_filled(self) -> bool:
+        return self.status in ("FILLED", "filled")
+
+    @property
+    def is_open(self) -> bool:
+        return self.status in ("NEW", "PARTIALLY_FILLED", "new", "partially_filled")
 
 
 @dataclass
 class Position:
-    symbol: str
-    side: OrderSide                      # BUY = long, SELL = short
-    entry_price: float
-    quantity: float
-    usdt_invested: float
-    inr_invested: float
-    entry_time: float
-    highest_price: float = 0.0           # For trailing stop (long)
-    lowest_price: float = 0.0            # For trailing stop (short)
+    """Represents an open position with tracking fields for the bot."""
+    # Core exchange fields
+    symbol: str = ""
+    side: str = ""                         # "BUY" or "SELL"
+    quantity: float = 0.0
+    entry_price: float = 0.0
+    mark_price: float = 0.0
+    unrealized_pnl: float = 0.0
+    margin: float = 0.0
+    raw: Optional[dict] = None
+
+    # Bot tracking fields
+    usdt_invested: float = 0.0
+    inr_invested: float = 0.0
+    entry_time: float = 0.0
+    highest_price: float = 0.0
+    lowest_price: float = 0.0
     trailing_stop_price: float = 0.0
     stop_order_id: str = ""
-    take_profit_target: float = 0.0
 
-    @property
-    def unrealized_pnl(self) -> float:
-        return 0.0  # Overwritten by bot with live price
+    def __post_init__(self):
+        if self.raw is None:
+            self.raw = {}
 
     @property
     def unrealized_pnl_pct(self) -> float:
-        if self.usdt_invested == 0:
-            return 0.0
-        return (self.unrealized_pnl / self.usdt_invested) * 100
+        if self.margin > 0:
+            return (self.unrealized_pnl / self.margin) * 100
+        return 0.0
 
 
-# =============================================================================
-# SharkEx Direct API Client (Spot)
-# =============================================================================
+# ---------------------------------------------------------------------------
+#  SharkEx v1 Client
+# ---------------------------------------------------------------------------
 
 class SharkExClient:
     """
-    Direct REST API client for SharkEx exchange.
-    Uses HMAC-SHA256 signing for authenticated endpoints.
-    
-    Public market data (OHLCV, ticker) is fetched from Binance via CCXT
-    as a fallback since SharkEx API routes are subject to change.
-    BTC/USDT pricing is universal across exchanges.
-    Trading operations (orders, balances) use SharkEx directly.
-    """
+    Pure SharkEx API v1 client using HMAC-SHA256 signature authentication.
 
-    BASE_URL = "https://api.sharkexchange.in"
+    Public endpoints (no auth):
+      - GET  /v1/market/ticker24Hr/{contractPair}
+      - POST /v1/market/klines?priceType=MARK_PRICE
+      - POST /v1/market/aggTrade
+      - POST /v1/market/depth
+
+    Authenticated endpoints:
+      - POST   /v1/order/place-order
+      - GET    /v1/order/open-orders
+      - GET    /v1/order/{clientOrderId}
+      - DELETE /v1/order/delete-order
+      - DELETE /v1/order/cancel-all
+      - GET    /v1/exchange/futures-wallet-details
+      - GET    /v1/positions/get-positions
+    """
 
     def __init__(self, api_key: str, api_secret: str, symbol: str = "BTC/USDT"):
         self.api_key = api_key
         self.api_secret = api_secret
-        self.symbol = symbol
-        self.base_symbol = symbol.split("/")[0]   # BTC
-        self.quote_symbol = symbol.split("/")[1]  # USDT
-        self.market_symbol = f"{self.base_symbol}{self.quote_symbol}"  # BTCUSDT
-        self.session = requests.Session()
-        self.session.headers.update({
+        self.symbol = symbol                         # "BTC/USDT"
+        self._market_symbol = symbol.replace("/", "")  # "BTCUSDT"
+        self._session = requests.Session()
+        self._session.headers.update({
             "Content-Type": "application/json",
-            "X-API-KEY": self.api_key,
+            "Accept": "application/json",
         })
-        
-        # Private API availability tracking
-        # SharkEx API is currently undergoing migration from /api/v2 HMAC to /v1 JWT.
-        # If all signed endpoints return 404/401, we stop calling them to avoid spam.
-        self._private_api_available: bool = True
-        self._private_api_fail_reason: str = ""
-        
-        # CCXT Binance fallback for public market data
-        self._binance = None
-        try:
-            self._binance = ccxt.binance({
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'},
-            })
-            self._binance.load_markets()
-            logger.info("SharkExClient: Binance CCXT fallback initialized for public data")
-        except Exception as e:
-            logger.warning(f"SharkExClient: Binance CCXT fallback unavailable ({e}). "
-                          "SharkEx public endpoints will be used directly.")
+        self._last_request_time: float = 0.0
+        self._min_request_interval: float = 0.05     # 50 ms rate-limit safety
+
+    # -- identity -----------------------------------------------------------
+
+    @property
+    def exchange_name(self) -> str:
+        return "SharkEx v1"
+
+    @property
+    def private_api_available(self) -> bool:
+        return True
 
     @property
     def private_api_status(self) -> dict:
-        """Return private API health status for bot.py to check."""
-        return {
-            "available": self._private_api_available,
-            "reason": self._private_api_fail_reason,
-        }
+        return {"available": True, "mode": "live"}
 
-    def _sign(self, method: str, path: str, params: dict = None) -> str:
-        """Generate HMAC-SHA256 signature"""
-        if params is None:
-            params = {}
-        query_string = urllib.parse.urlencode(sorted(params.items())) if params else ""
-        message = f"{method.upper()}{path}{query_string}"
+    # -- rate limiting ------------------------------------------------------
+
+    def _rate_limit(self):
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self._min_request_interval:
+            time.sleep(self._min_request_interval - elapsed)
+
+    # -- auth helpers -------------------------------------------------------
+
+    def _sign_get(self, params: dict) -> Tuple[str, dict]:
+        """
+        Sign a GET request.
+        Sorts params + timestamp, signs the query string.
+        Returns (query_string, headers).
+        """
+        params = dict(params)
+        params["timestamp"] = str(int(time.time() * 1000))
+        sorted_items = sorted(params.items())
+        query_string = urlencode(sorted_items)
         signature = hmac.new(
             self.api_secret.encode("utf-8"),
-            message.encode("utf-8"),
-            hashlib.sha256
+            query_string.encode("utf-8"),
+            hashlib.sha256,
         ).hexdigest()
-        return signature
+        headers = {
+            "api-key": self.api_key,
+            "signature": signature,
+        }
+        return query_string, headers
 
-    def _request(self, method: str, path: str, params: dict = None, 
-                 data: dict = None, signed: bool = False) -> dict:
-        """Make HTTP request to SharkEx API"""
-        url = f"{self.BASE_URL}{path}"
-        
-        headers = {}
-        if signed:
-            signature = self._sign(method, path, params)
-            headers["X-SIGNATURE"] = signature
+    def _sign_body(self, params: dict) -> Tuple[str, dict]:
+        """
+        Sign a POST / PUT / DELETE request.
+        Adds timestamp to body dict, signs the JSON string.
+        Returns (body_json_string, headers).
+        """
+        params = dict(params)
+        params["timestamp"] = str(int(time.time() * 1000))
+        body = json.dumps(params)
+        signature = hmac.new(
+            self.api_secret.encode("utf-8"),
+            body.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        headers = {
+            "api-key": self.api_key,
+            "signature": signature,
+            "Content-Type": "application/json",
+        }
+        return body, headers
 
-        try:
-            if method.upper() == "GET":
-                resp = self.session.get(url, params=params, headers=headers, timeout=15)
-            elif method.upper() == "POST":
-                resp = self.session.post(url, params=params, json=data, headers=headers, timeout=15)
-            elif method.upper() == "DELETE":
-                resp = self.session.delete(url, params=params, headers=headers, timeout=15)
-            else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
+    # -- HTTP core ----------------------------------------------------------
 
-            if resp.status_code == 429:
-                logger.warning("Rate limited! Waiting 2 seconds...")
-                time.sleep(2)
-                return self._request(method, path, params, data, signed)
-            
-            # Detect SharkEx API migration: 404/401 on signed endpoints means
-            # the private API is unavailable. Disable future calls to avoid spam.
-            if signed and resp.status_code in (404, 401):
-                if self._private_api_available:
-                    reason = resp.text[:200] if resp.text else f"HTTP {resp.status_code}"
-                    self._private_api_available = False
-                    self._private_api_fail_reason = (
-                        f"SharkEx private API returned {resp.status_code} for {method} {path}. "
-                        f"API may have been migrated to /v1/ with JWT auth. "
-                        f"Response: {reason}"
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict] = None,
+        authenticated: bool = True,
+        retries: int = 2,
+    ) -> dict:
+        """
+        Make an HTTP request to the SharkEx v1 API.
+
+        Parameters
+        ----------
+        method : str
+            HTTP method (GET, POST, PUT, DELETE).
+        path : str
+            URL path relative to BASE_URL, e.g. "/v1/market/ticker24Hr/BTCUSDT".
+        params : dict, optional
+            Query-string or body parameters.
+        authenticated : bool
+            Whether the endpoint requires HMAC auth headers.
+        retries : int
+            Number of retry attempts on server errors.
+        """
+        url = urljoin(BASE_URL, path)
+        params = dict(params or {})
+        self._rate_limit()
+
+        for attempt in range(retries + 1):
+            try:
+                if not authenticated:
+                    # Public endpoints – simple request, no auth
+                    if method in ("POST", "PUT"):
+                        resp = self._session.post(
+                            url, data=json.dumps(params), timeout=15
+                        )
+                    else:
+                        resp = self._session.get(url, params=params, timeout=15)
+                elif method == "GET":
+                    _, headers = self._sign_get(params)
+                    resp = self._session.get(url, params=params, headers=headers, timeout=15)
+                elif method in ("POST", "PUT", "DELETE"):
+                    body, headers = self._sign_body(params)
+                    resp = self._session.request(
+                        method, url, data=body, headers=headers, timeout=15
                     )
-                    logger.warning(self._private_api_fail_reason)
+                else:
+                    resp = self._session.request(method, url, json=params, timeout=15)
+
+                self._last_request_time = time.time()
+
+                if resp.status_code == 200:
+                    return resp.json()
+                elif resp.status_code == 429:
+                    logger.warning("Rate-limited by SharkEx API. Waiting 5 s …")
+                    time.sleep(5)
+                    continue
+                elif resp.status_code >= 500 and attempt < retries:
                     logger.warning(
-                        "SharkEx private API is UNAVAILABLE. "
-                        "Switching to safe mode: balance/order operations will return defaults. "
-                        "Use --paper flag or set PAPER_TRADING=true for paper trading."
+                        f"SharkEx API server error {resp.status_code}, retrying ({attempt + 1}/{retries}) …"
                     )
-                return {"error": "private_api_unavailable", "reason": self._private_api_fail_reason}
+                    time.sleep(1)
+                    continue
+                else:
+                    logger.error(
+                        f"SharkEx API error {resp.status_code} on {method} {path}: {resp.text[:300]}"
+                    )
+                    return {
+                        "error": True,
+                        "code": resp.status_code,
+                        "message": resp.text[:300],
+                    }
 
-            resp.raise_for_status()
-            
-            result = resp.json()
-            # SharkEx typically wraps responses in {success: true, data: {...}}
-            if isinstance(result, dict) and "data" in result:
-                return result["data"]
-            return result
+            except requests.exceptions.Timeout:
+                logger.error(f"SharkEx API timeout on {method} {path}")
+                if attempt < retries:
+                    time.sleep(1)
+                    continue
+                return {"error": True, "code": -1, "message": "Request timeout"}
+            except requests.exceptions.ConnectionError as e:
+                logger.error(f"SharkEx API connection error: {e}")
+                if attempt < retries:
+                    time.sleep(2)
+                    continue
+                return {"error": True, "code": -2, "message": str(e)}
+            except Exception as e:
+                logger.error(f"SharkEx API unexpected error: {e}")
+                return {"error": True, "code": -3, "message": str(e)}
 
-        except requests.exceptions.RequestException as e:
-            # Don't re-log private API errors if already marked unavailable
-            err_str = str(e)
-            if signed and self._private_api_available and ("404" in err_str or "401" in err_str):
-                self._private_api_available = False
-                self._private_api_fail_reason = (
-                    f"SharkEx private API unreachable [{method} {path}]: {err_str[:200]}. "
-                    f"API may have been migrated."
-                )
-                logger.warning(self._private_api_fail_reason)
-                logger.warning(
-                    "SharkEx private API is UNAVAILABLE. "
-                    "Balance/order operations will return safe defaults."
-                )
-                return {"error": "private_api_unavailable", "reason": self._private_api_fail_reason}
-            
-            logger.error(f"SharkEx API error [{method} {path}]: {e}")
-            return {"error": str(e)}
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON response from SharkEx for {method} {path}")
-            return {"error": "Invalid JSON response"}
+        return {"error": True, "code": -99, "message": "Max retries exceeded"}
 
-    # ---- PUBLIC ENDPOINTS ----
+    # =======================================================================
+    #  PUBLIC MARKET DATA
+    # =======================================================================
 
     def fetch_ticker(self) -> dict:
-        """Fetch current ticker for the symbol.
-        GET /api/v2/tickers
         """
-        path = "/api/v2/tickers"
-        result = self._request("GET", path)
-        
-        if isinstance(result, dict):
-            # If result has the ticker for our market_symbol
-            ticker_key = self.market_symbol.lower()
-            if ticker_key in result:
-                return result[ticker_key]
-            # If it's a list-style response
-            if "ticker" in result:
-                ticker_data = result["ticker"]
-                if "last" in ticker_data:
-                    return ticker_data
-            # Try common fields
-            if "last" in result:
-                return result
-        return result
+        GET /v1/market/ticker24Hr/{contractPair}  (public, no auth)
 
-    def fetch_ohlcv(self, timeframe: str = "5m", limit: int = 100,
-                    since: int = None) -> List[List[float]]:
-        """Fetch OHLCV (candlestick) data.
-        Uses Binance CCXT as primary source (universal BTC/USDT pricing).
-        Falls back to SharkEx API if CCXT is unavailable.
-        Returns: [[timestamp, open, high, low, close, volume], ...]
+        Response fields: symbol, priceChange, priceChangePercent, lastPrice,
+        lastQty, highPrice, lowPrice, volume, quoteVolume, openPrice,
+        openTime, closeTime.
         """
-        # --- Primary: Binance CCXT ---
-        if self._binance:
-            try:
-                ohlcv = self._binance.fetch_ohlcv(
-                    self.symbol, timeframe=timeframe, limit=limit, since=since
-                )
-                if ohlcv and len(ohlcv) > 0:
-                    return ohlcv
-            except Exception as e:
-                logger.warning(f"Binance OHLCV fetch failed: {e}, trying SharkEx...")
+        return self._request(
+            "GET",
+            f"/v1/market/ticker24Hr/{self._market_symbol}",
+            authenticated=False,
+        )
 
-        # --- Fallback: SharkEx direct API ---
-        path = "/api/v2/klines"
-        params = {
-            "market": self.market_symbol.lower(),
-            "period": self._timeframe_to_minutes(timeframe),
+    def fetch_current_price(self) -> float:
+        """Return the latest 'lastPrice' from the 24hr ticker."""
+        try:
+            ticker = self.fetch_ticker()
+            if "error" in ticker:
+                logger.error(f"Failed to fetch price: {ticker.get('message')}")
+                return 0.0
+            price = ticker.get("lastPrice", 0)
+            return float(price)
+        except Exception as e:
+            logger.error(f"Error fetching current price: {e}")
+            return 0.0
+
+    def fetch_ohlcv(
+        self,
+        timeframe: str = "5m",
+        limit: int = 100,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        POST /v1/market/klines?priceType=MARK_PRICE  (public, no auth)
+
+        Body: { symbol, interval, limit, startTime?, endTime? }
+
+        Returns list of dicts with keys: timestamp, open, high, low, close, volume.
+        """
+        body: Dict[str, Any] = {
+            "symbol": self._market_symbol,
+            "interval": timeframe,
             "limit": limit,
         }
-        if since:
-            params["time_from"] = since
+        if start_time:
+            body["startTime"] = start_time
+        if end_time:
+            body["endTime"] = end_time
 
-        result = self._request("GET", path, params=params)
+        resp = self._request(
+            "POST",
+            "/v1/market/klines?priceType=MARK_PRICE",
+            params=body,
+            authenticated=False,
+        )
 
-        if isinstance(result, list):
-            ohlcv = []
-            for candle in result:
-                if isinstance(candle, list) and len(candle) >= 5:
-                    ohlcv.append(candle)
-                elif isinstance(candle, dict):
-                    ts = candle.get("time", candle.get("t", 0))
-                    if isinstance(ts, str):
-                        ts = int(ts) if ts.isdigit() else 0
-                    ohlcv.append([
-                        int(ts) * 1000 if ts < 10000000000 else int(ts),
-                        float(candle.get("open", candle.get("o", 0))),
-                        float(candle.get("high", candle.get("h", 0))),
-                        float(candle.get("low", candle.get("l", 0))),
-                        float(candle.get("close", candle.get("c", 0))),
-                        float(candle.get("volume", candle.get("v", 0))),
-                    ])
-            return ohlcv
-
-        logger.error(f"Unexpected OHLCV response: {result}")
-        return []
-
-    def fetch_current_price(self) -> float:
-        """Fetch the last traded price for the symbol.
-        Uses Binance CCXT as primary source, falls back to SharkEx ticker.
-        """
-        if self._binance:
-            try:
-                ticker = self._binance.fetch_ticker(self.symbol)
-                if ticker and ticker.get('last'):
-                    return float(ticker['last'])
-            except Exception as e:
-                logger.warning(f"Binance ticker fetch failed: {e}, trying SharkEx...")
-
-        ticker = self.fetch_ticker()
-        if isinstance(ticker, dict):
-            price = ticker.get("last", ticker.get("last_price", ticker.get("close", 0)))
-            return float(price) if price else 0.0
-        elif isinstance(ticker, list) and len(ticker) > 0:
-            t = ticker[0]
-            if isinstance(t, dict):
-                return float(t.get("last", t.get("close", 0)))
-        return 0.0
-
-    # ---- PRIVATE/AUTHENTICATED ENDPOINTS ----
-
-    def fetch_balance(self) -> dict:
-        """Fetch account balances.
-        GET /api/v2/account/balances
-        
-        Returns empty dict if private API is unavailable.
-        """
-        if not self._private_api_available:
-            return {}
-        
-        path = "/api/v2/account/balances"
-        result = self._request("GET", path, signed=True)
-        
-        if isinstance(result, dict):
-            if result.get("error") == "private_api_unavailable":
-                return {}
-            
-            balances = {}
-            for currency, details in result.items():
-                if isinstance(details, dict):
-                    balances[currency.upper()] = {
-                        "free": float(details.get("available", details.get("free", 0))),
-                        "used": float(details.get("locked", details.get("frozen", details.get("used", 0)))),
-                        "total": float(details.get("balance", details.get("total", 0))),
-                    }
-            if balances:
-                return balances
-            
-            # Alternative format
-            if "balances" in result:
-                for b in result["balances"]:
-                    curr = b.get("currency", b.get("asset", "")).upper()
-                    balances[curr] = {
-                        "free": float(b.get("free", b.get("available", 0))),
-                        "used": float(b.get("locked", b.get("frozen", 0))),
-                        "total": float(b.get("total", b.get("balance", 0))),
-                    }
-            return balances
-
-        return {}
-
-    def fetch_free_balance(self, currency: str) -> float:
-        """Get free (available) balance for a specific currency."""
-        balances = self.fetch_balance()
-        currency = currency.upper()
-        if currency in balances:
-            return balances[currency].get("free", 0.0)
-        return 0.0
-
-    def create_market_order(self, side: str, quantity: float) -> Optional[Order]:
-        """Create a market order.
-        POST /api/v2/orders
-        
-        Args:
-            side: 'buy' or 'sell'
-            quantity: Amount in base currency (BTC)
-        
-        Returns None if private API is unavailable.
-        """
-        if not self._private_api_available:
-            return None
-        
-        path = "/api/v2/orders"
-        data = {
-            "market": self.market_symbol.lower(),
-            "side": side,
-            "volume": str(quantity),
-            "ord_type": "market",
-        }
-
-        result = self._request("POST", path, data=data, signed=True)
-
-        if isinstance(result, dict) and "id" in result:
-            return Order(
-                id=str(result.get("id")),
-                symbol=self.symbol,
-                side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-                order_type=OrderType.MARKET,
-                amount=quantity,
-                filled=float(result.get("executed_volume", result.get("filled", quantity))),
-                remaining=float(result.get("remaining_volume", result.get("remaining", 0))),
-                status=OrderStatus.FILLED if result.get("state") in ("done", "filled") else OrderStatus.OPEN,
-                timestamp=time.time(),
-                average_price=float(result.get("avg_price", result.get("price", 0))),
-            )
-
-        logger.error(f"Failed to create market order: {result}")
-        return None
-
-    def create_stop_order(self, side: str, quantity: float,
-                          stop_price: float, limit_price: float = None) -> Optional[Order]:
-        """Create a stop-loss order (stop-market or stop-limit).
-        POST /api/v2/orders
-        
-        Args:
-            side: 'buy' or 'sell' (opposite of position for stop)
-            quantity: Amount in base currency
-            stop_price: Trigger/stop price
-            limit_price: Optional limit price (for stop-limit orders)
-        
-        Returns None if private API is unavailable.
-        """
-        if not self._private_api_available:
-            return None
-        
-        path = "/api/v2/orders"
-        data = {
-            "market": self.market_symbol.lower(),
-            "side": side,
-            "volume": str(quantity),
-            "ord_type": "stop_limit" if limit_price else "stop_market",
-            "price": str(limit_price or stop_price),
-            "trigger_price": str(stop_price),
-        }
-
-        result = self._request("POST", path, data=data, signed=True)
-
-        if isinstance(result, dict) and "id" in result:
-            return Order(
-                id=str(result.get("id")),
-                symbol=self.symbol,
-                side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-                order_type=OrderType.STOP_MARKET if not limit_price else OrderType.STOP_LIMIT,
-                price=stop_price,
-                amount=quantity,
-                status=OrderStatus.OPEN,
-                timestamp=time.time(),
-            )
-
-        # Fallback: try stop-limit
-        logger.warning(f"Stop-market failed ({result}), trying stop-limit...")
-        if not limit_price:
-            buffer = 0.001  # 0.1% buffer
-            if side == "sell":
-                limit_price = stop_price * (1 - buffer)
-            else:
-                limit_price = stop_price * (1 + buffer)
-            data["ord_type"] = "stop_limit"
-            data["price"] = str(limit_price)
-            data["trigger_price"] = str(stop_price)
-
-            result = self._request("POST", path, data=data, signed=True)
-            if isinstance(result, dict) and "id" in result:
-                return Order(
-                    id=str(result.get("id")),
-                    symbol=self.symbol,
-                    side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-                    order_type=OrderType.STOP_LIMIT,
-                    price=stop_price,
-                    amount=quantity,
-                    status=OrderStatus.OPEN,
-                    timestamp=time.time(),
-                )
-
-        logger.error(f"Failed to create stop order: {result}")
-        return None
-
-    def cancel_order(self, order_id: str) -> bool:
-        """Cancel an existing order.
-        DELETE /api/v2/order
-        
-        Returns False if private API is unavailable.
-        """
-        if not self._private_api_available:
-            return False
-        
-        path = "/api/v2/order/delete"
-        params = {"id": order_id}
-
-        result = self._request("POST", path, params=params, signed=True)
-
-        if isinstance(result, dict):
-            if result.get("error"):
-                logger.error(f"Cancel failed for {order_id}: {result.get('error')}")
-                return False
-            return True
-
-        return "error" not in str(result).lower()
-
-    def fetch_order(self, order_id: str) -> Optional[Order]:
-        """Fetch a specific order by ID.
-        GET /api/v2/order
-        
-        Returns None if private API is unavailable.
-        """
-        if not self._private_api_available:
-            return None
-        
-        path = "/api/v2/order"
-        params = {"id": order_id}
-
-        result = self._request("GET", path, params=params, signed=True)
-
-        if isinstance(result, dict) and "id" in result:
-            side = result.get("side", "buy")
-            return Order(
-                id=str(result.get("id")),
-                symbol=self.symbol,
-                side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-                order_type=OrderType(result.get("ord_type", "market")),
-                price=float(result.get("price", 0)),
-                amount=float(result.get("volume", 0)),
-                filled=float(result.get("executed_volume", result.get("filled", 0))),
-                remaining=float(result.get("remaining_volume", result.get("remaining", 0))),
-                status=OrderStatus(result.get("state", "open")),
-                timestamp=time.time(),
-                average_price=float(result.get("avg_price", 0)),
-            )
-        return None
-
-    def _timeframe_to_minutes(self, tf: str) -> int:
-        """Convert CCXT timeframe format to minutes."""
-        mapping = {
-            "1m": 1, "5m": 5, "15m": 15, "30m": 30,
-            "1h": 60, "2h": 120, "4h": 240,
-            "1d": 1440, "1w": 10080,
-        }
-        return mapping.get(tf, 5)
-
-
-# =============================================================================
-# Binance Futures Testnet Client
-# =============================================================================
-
-class BinanceFuturesClient:
-    """CCXT-based client for Binance Futures Testnet."""
-
-    def __init__(self, api_key: str, api_secret: str, symbol: str = "BTC/USDT"):
-        self.exchange = ccxt.binance({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "options": {
-                "defaultType": "future",
-            },
-            "urls": {
-                "api": {
-                    "public": "https://testnet.binancefuture.com/fapi/v1",
-                    "private": "https://testnet.binancefuture.com/fapi/v1",
-                },
-            },
-        })
-        self.exchange.set_sandbox_mode(True)
-        self.symbol = symbol
-        self.base_symbol = symbol.split("/")[0]
-        self.quote_symbol = symbol.split("/")[1]
-        self.market_symbol = f"{self.base_symbol}{self.quote_symbol}"
-
-    def fetch_ticker(self) -> dict:
-        try:
-            return self.exchange.fetch_ticker(self.symbol)
-        except Exception as e:
-            logger.error(f"Binance ticker error: {e}")
-            return {}
-
-    def fetch_ohlcv(self, timeframe: str = "5m", limit: int = 100,
-                    since: int = None) -> List[List[float]]:
-        try:
-            return self.exchange.fetch_ohlcv(
-                self.symbol, timeframe=timeframe, limit=limit, since=since
-            )
-        except Exception as e:
-            logger.error(f"Binance OHLCV error: {e}")
+        if "error" in resp:
+            logger.error(f"Failed to fetch klines: {resp.get('message')}")
             return []
 
-    def fetch_current_price(self) -> float:
-        ticker = self.fetch_ticker()
-        return float(ticker.get("last", ticker.get("close", 0))) if ticker else 0.0
+        # Response is an array of arrays (Binance-style):
+        #   [openTime, open, high, low, close, volume, closeTime,
+        #    quoteVolume, trades, takerBuyBaseVol, takerBuyQuoteVol, ignored]
+        candles: List[Dict[str, Any]] = []
+        data = resp if isinstance(resp, list) else resp.get("data", resp)
+        if not isinstance(data, list):
+            return candles
+
+        for row in data:
+            if isinstance(row, list) and len(row) >= 6:
+                candles.append({
+                    "timestamp": int(row[0]),
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": float(row[5]),
+                })
+        return candles
+
+    # =======================================================================
+    #  ACCOUNT & WALLET
+    # =======================================================================
 
     def fetch_balance(self) -> dict:
-        try:
-            bal = self.exchange.fetch_balance()
-            result = {}
-            if "USDT" in bal:
-                result["USDT"] = {
-                    "free": float(bal["USDT"].get("free", 0)),
-                    "used": float(bal["USDT"].get("used", 0)),
-                    "total": float(bal["USDT"].get("total", 0)),
-                }
-            if self.base_symbol in bal:
-                result[self.base_symbol] = {
-                    "free": float(bal[self.base_symbol].get("free", 0)),
-                    "used": float(bal[self.base_symbol].get("used", 0)),
-                    "total": float(bal[self.base_symbol].get("total", 0)),
-                }
-            return result
-        except Exception as e:
-            logger.error(f"Binance balance error: {e}")
-            return {}
+        """
+        GET /v1/exchange/futures-wallet-details  (authenticated)
+
+        Returns dict like {"USDT": {"free": 123.45, "total": 123.45}, ...}
+        """
+        resp = self._request(
+            "GET",
+            "/v1/exchange/futures-wallet-details",
+            authenticated=True,
+        )
+
+        if "error" in resp:
+            logger.error(f"Failed to fetch balance: {resp.get('message')}")
+            return {"USDT": {"free": 0, "total": 0}}
+
+        balances: Dict[str, Dict[str, float]] = {}
+
+        # Response structure per docs: { "data": [{ coin, balance, availableBalance, ... }, ...] }
+        wallet_data = resp.get("data", [])
+        if isinstance(wallet_data, list):
+            for coin in wallet_data:
+                if not isinstance(coin, dict):
+                    continue
+                currency = coin.get("coin", coin.get("asset", ""))
+                if not currency:
+                    continue
+                total = float(coin.get("balance", coin.get("walletBalance", 0)))
+                free = float(coin.get("availableBalance", coin.get("availableMargin", total)))
+                balances[currency] = {"free": free, "total": total}
+        elif isinstance(resp, dict):
+            # Try to parse whatever format the API returned
+            for key, val in resp.items():
+                if isinstance(val, dict) and "balance" in val:
+                    balances[key] = {
+                        "free": float(val.get("availableBalance", val.get("free", 0))),
+                        "total": float(val.get("balance", val.get("total", 0))),
+                    }
+                elif isinstance(val, (int, float)) and key.isupper():
+                    balances[key] = {"free": float(val), "total": float(val)}
+
+        if "USDT" not in balances:
+            balances["USDT"] = {"free": 0, "total": 0}
+
+        return balances
 
     def fetch_free_balance(self, currency: str) -> float:
+        """Return the free (available) balance for *currency*."""
         balances = self.fetch_balance()
-        currency = currency.upper()
-        if currency in balances:
-            return balances[currency].get("free", 0.0)
-        return 0.0
+        return balances.get(currency, {}).get("free", 0)
+
+    # =======================================================================
+    #  POSITIONS
+    # =======================================================================
+
+    def fetch_positions(self) -> List[Position]:
+        """
+        GET /v1/positions/get-positions  (authenticated)
+
+        Returns list of Position objects for non-zero positions.
+        """
+        resp = self._request(
+            "GET",
+            "/v1/positions/get-positions",
+            authenticated=True,
+        )
+
+        if "error" in resp:
+            logger.error(f"Failed to fetch positions: {resp.get('message')}")
+            return []
+
+        # Response format per docs: { data: [ { symbol, positionAmt, entryPrice,
+        #   markPrice, unRealizedProfit, ... }, ... ] }
+        pos_list = resp.get("data", resp)
+        if isinstance(pos_list, dict):
+            pos_list = [pos_list]
+        if not isinstance(pos_list, list):
+            return []
+
+        positions: List[Position] = []
+        for p in pos_list:
+            if not isinstance(p, dict):
+                continue
+            qty = float(p.get("positionAmt", p.get("quantity", 0)))
+            if abs(qty) < 1e-8:
+                continue
+            positions.append(Position(
+                symbol=p.get("symbol", self._market_symbol),
+                side="BUY" if qty > 0 else "SELL",
+                quantity=abs(qty),
+                entry_price=float(p.get("entryPrice", 0)),
+                mark_price=float(p.get("markPrice", 0)),
+                unrealized_pnl=float(p.get("unRealizedProfit", p.get("unrealizedPnl", 0))),
+                margin=float(p.get("margin", p.get("isolatedMargin", 0))),
+                raw=p,
+            ))
+
+        return positions
+
+    # =======================================================================
+    #  ORDERS
+    # =======================================================================
 
     def create_market_order(self, side: str, quantity: float) -> Optional[Order]:
-        try:
-            self.exchange.set_leverage(1, self.symbol)  # 1x spot-like
-            result = self.exchange.create_order(
-                self.symbol, "market", side, quantity
-            )
-            return Order(
-                id=result.get("id", ""),
-                symbol=self.symbol,
-                side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-                order_type=OrderType.MARKET,
-                amount=quantity,
-                filled=float(result.get("filled", quantity)),
-                status=OrderStatus.FILLED if result.get("status") == "closed" else OrderStatus.OPEN,
-                timestamp=time.time(),
-                average_price=float(result.get("average", result.get("price", 0))),
-            )
-        except Exception as e:
-            logger.error(f"Binance market order error: {e}")
+        """
+        POST /v1/order/place-order  (authenticated)
+
+        Body: { placeType, quantity, side, symbol, type }
+        """
+        params = {
+            "placeType": "order_type",
+            "quantity": str(quantity),
+            "side": side.upper(),
+            "symbol": self._market_symbol,
+            "type": "MARKET",
+        }
+
+        resp = self._request(
+            "POST",
+            "/v1/order/place-order",
+            params=params,
+            authenticated=True,
+        )
+
+        if "error" in resp:
+            logger.error(f"Failed to create MARKET order: {resp.get('message')}")
             return None
 
-    def create_stop_order(self, side: str, quantity: float,
-                          stop_price: float, limit_price: float = None) -> Optional[Order]:
-        try:
-            params = {
-                "stopPrice": stop_price,
-            }
-            order_type = "STOP_MARKET"
-            
-            result = self.exchange.create_order(
-                self.symbol, order_type, side, quantity, None, params
-            )
-            return Order(
-                id=result.get("id", ""),
-                symbol=self.symbol,
-                side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-                order_type=OrderType.STOP_MARKET,
-                price=stop_price,
-                amount=quantity,
-                status=OrderStatus.OPEN,
-                timestamp=time.time(),
-            )
-        except Exception as e:
-            logger.error(f"Binance stop order error: {e}")
+        return self._parse_order_response(resp, side)
+
+    def create_stop_order(
+        self, side: str, quantity: float, stop_price: float
+    ) -> Optional[Order]:
+        """
+        POST /v1/order/place-order  (authenticated)
+
+        Body: { placeType, quantity, side, symbol, type, stopPrice }
+        """
+        params = {
+            "placeType": "order_type",
+            "quantity": str(quantity),
+            "side": side.upper(),
+            "symbol": self._market_symbol,
+            "type": "STOP_MARKET",
+            "stopPrice": str(stop_price),
+        }
+
+        resp = self._request(
+            "POST",
+            "/v1/order/place-order",
+            params=params,
+            authenticated=True,
+        )
+
+        if "error" in resp:
+            logger.error(f"Failed to create STOP order: {resp.get('message')}")
             return None
+
+        return self._parse_order_response(resp, side)
 
     def cancel_order(self, order_id: str) -> bool:
-        try:
-            self.exchange.cancel_order(order_id, self.symbol)
-            return True
-        except Exception as e:
-            logger.error(f"Binance cancel error: {e}")
+        """
+        DELETE /v1/order/delete-order  (authenticated)
+
+        Body: { clientOrderId }
+        """
+        params = {"clientOrderId": order_id}
+
+        resp = self._request(
+            "DELETE",
+            "/v1/order/delete-order",
+            params=params,
+            authenticated=True,
+        )
+
+        if "error" in resp:
+            logger.error(f"Failed to cancel order {order_id}: {resp.get('message')}")
             return False
 
+        logger.info(f"Order cancelled: {order_id}")
+        return True
+
     def fetch_order(self, order_id: str) -> Optional[Order]:
+        """
+        GET /v1/order/{clientOrderId}  (authenticated)
+
+        Fetch order details by client order ID.
+        """
+        resp = self._request(
+            "GET",
+            f"/v1/order/{order_id}",
+            authenticated=True,
+        )
+
+        if "error" in resp:
+            logger.error(f"Failed to fetch order {order_id}: {resp.get('message')}")
+            return None
+
+        return self._parse_order_response(resp, resp.get("side", ""))
+
+    def fetch_open_orders(self) -> List[Order]:
+        """
+        GET /v1/order/open-orders  (authenticated)
+
+        Query: { symbol, timestamp }
+        """
+        params = {"symbol": self._market_symbol}
+        resp = self._request(
+            "GET",
+            "/v1/order/open-orders",
+            params=params,
+            authenticated=True,
+        )
+
+        if "error" in resp:
+            logger.error(f"Failed to fetch open orders: {resp.get('message')}")
+            return []
+
+        data = resp if isinstance(resp, list) else resp.get("data", [])
+        if not isinstance(data, list):
+            return []
+
+        orders: List[Order] = []
+        for o in data:
+            if isinstance(o, dict):
+                parsed = self._parse_order_response(o, o.get("side", ""))
+                if parsed:
+                    orders.append(parsed)
+        return orders
+
+    def cancel_all_orders(self) -> bool:
+        """
+        DELETE /v1/order/cancel-all  (authenticated)
+
+        Body: { symbol }
+        """
+        params = {"symbol": self._market_symbol}
+        resp = self._request(
+            "DELETE",
+            "/v1/order/cancel-all",
+            params=params,
+            authenticated=True,
+        )
+
+        if "error" in resp:
+            logger.error(f"Failed to cancel all orders: {resp.get('message')}")
+            return False
+
+        logger.info("All open orders cancelled")
+        return True
+
+    # =======================================================================
+    #  RESPONSE PARSING
+    # =======================================================================
+
+    def _parse_order_response(self, resp: dict, side: str) -> Optional[Order]:
+        """Map a SharkEx v1 JSON order response to our Order dataclass."""
         try:
-            result = self.exchange.fetch_order(order_id, self.symbol)
             return Order(
-                id=result.get("id", ""),
-                symbol=self.symbol,
-                side=OrderSide.BUY if result.get("side") == "buy" else OrderSide.SELL,
-                order_type=OrderType(result.get("type", "market")),
-                price=float(result.get("price", 0)),
-                amount=float(result.get("amount", 0)),
-                filled=float(result.get("filled", 0)),
-                remaining=float(result.get("remaining", 0)),
-                status=OrderStatus(result.get("status", "open")),
-                timestamp=time.time(),
-                average_price=float(result.get("average", 0)),
+                order_id=resp.get("clientOrderId", resp.get("id", "")),
+                client_order_id=resp.get("clientOrderId", ""),
+                symbol=resp.get("symbol", self._market_symbol),
+                side=(resp.get("side", side) or "").upper(),
+                order_type=resp.get("type", resp.get("orderType", "")),
+                price=float(resp.get("price", 0) or 0),
+                stop_price=float(resp.get("stopPrice", 0) or 0),
+                quantity=float(resp.get("origQty", resp.get("quantity", 0)) or 0),
+                executed_qty=float(resp.get("executedQty", 0) or 0),
+                status=resp.get("status", "NEW"),
+                avg_price=float(resp.get("avgPrice", 0) or 0),
+                raw=resp,
             )
         except Exception as e:
-            logger.error(f"Binance fetch order error: {e}")
+            logger.error(f"Error parsing order response: {e} | raw={resp}")
             return None
 
 
-# =============================================================================
-# Exchange Client Factory
-# =============================================================================
+# ---------------------------------------------------------------------------
+#  Factory
+# ---------------------------------------------------------------------------
 
-def create_exchange_client(cfg: BotConfig):
-    """
-    Factory function to create the appropriate exchange client
-    based on configuration.
-    """
-    if cfg.exchange.exchange_name == "sharkex":
-        logger.info("Creating SharkEx client (Spot, Long Only)...")
-        return SharkExClient(
-            api_key=cfg.exchange.api_key,
-            api_secret=cfg.exchange.api_secret,
-            symbol=cfg.exchange.symbol,
-        )
-    elif cfg.exchange.exchange_name == "binance":
-        logger.info("Creating Binance Futures Testnet client...")
-        return BinanceFuturesClient(
-            api_key=cfg.exchange.api_key,
-            api_secret=cfg.exchange.api_secret,
-            symbol=cfg.exchange.symbol,
-        )
-    else:
-        raise ValueError(f"Unsupported exchange: {cfg.exchange.exchange_name}")
+def create_exchange_client(cfg: BotConfig) -> SharkExClient:
+    """Create a SharkEx v1 exchange client from bot configuration."""
+    return SharkExClient(
+        api_key=cfg.exchange.api_key,
+        api_secret=cfg.exchange.api_secret,
+        symbol=cfg.exchange.symbol,
+    )
