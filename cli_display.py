@@ -1,8 +1,9 @@
 """
-cli_display.py - Interactive Live CLI Dashboard
+cli_display.py - Professional Terminal-Adaptive Live CLI Dashboard
 
-Renders a rich live-updating CLI dashboard with interactive controls.
-Users can modify settings on-the-fly using keyboard hotkeys.
+Renders a clean, responsive trading dashboard that automatically adjusts
+to terminal width.  On wide terminals (≥100 cols) panels are side-by-side;
+on narrow terminals they stack vertically for perfect readability over SSH.
 
 Hotkeys (anytime):
   [M]  - Open settings menu
@@ -21,6 +22,7 @@ import os
 import sys
 import time
 import queue
+import shutil
 import threading
 import logging
 from datetime import datetime
@@ -45,21 +47,13 @@ logger = logging.getLogger("cli_display")
 
 IST = pytz.timezone("Asia/Kolkata")
 
-# ─── Color constants ───
-GREEN = "green"
-RED = "red"
-YELLOW = "yellow"
-CYAN = "cyan"
-WHITE = "white"
-MAGENTA = "magenta"
-BRIGHT_GREEN = "bright_green"
-BRIGHT_RED = "bright_red"
-GOLD = "gold1"
-DIM = "dim"
+# ─── Responsive threshold ───
+WIDE_MIN_WIDTH = 100   # cols needed for side-by-side layout
+NARROW_MIN_WIDTH = 60  # below this we strip even more
 
 
 # =============================================================================
-# Keyboard Listener (cross-platform non-blocking stdin)
+# Keyboard Listener (cross-platform non-blocking stdin) — UNCHANGED
 # =============================================================================
 
 class KeyboardListener:
@@ -78,18 +72,15 @@ class KeyboardListener:
 
     @property
     def pending(self) -> bool:
-        """Check if there are unread keystrokes."""
         return not self._queue.empty()
 
     def get_key(self) -> Optional[str]:
-        """Get the next keystroke, or None if queue is empty."""
         try:
             return self._queue.get_nowait()
         except queue.Empty:
             return None
 
     def drain(self) -> List[str]:
-        """Drain all pending keystrokes from the queue."""
         keys = []
         while not self._queue.empty():
             try:
@@ -99,18 +90,15 @@ class KeyboardListener:
         return keys
 
     def start(self):
-        """Start the background keyboard listener."""
         if not sys.stdin.isatty():
             logger.debug("stdin is not a TTY; keyboard listener disabled")
             return
-
         self._running = True
         self._thread = threading.Thread(target=self._listen, daemon=True)
         self._thread.start()
         logger.debug("Keyboard listener started")
 
     def stop(self):
-        """Stop the listener and restore terminal settings."""
         self._running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=0.5)
@@ -118,7 +106,6 @@ class KeyboardListener:
         logger.debug("Keyboard listener stopped")
 
     def _listen(self):
-        """Main listen loop - dispatches to platform-specific handler."""
         try:
             if os.name == 'nt':
                 self._listen_windows()
@@ -128,7 +115,6 @@ class KeyboardListener:
             logger.debug(f"Keyboard listener error: {e}")
 
     def _listen_windows(self):
-        """Windows: use msvcrt for non-blocking console input."""
         import msvcrt
         while self._running:
             try:
@@ -137,8 +123,7 @@ class KeyboardListener:
                     try:
                         key = ch.decode('utf-8', errors='ignore').lower()
                     except (UnicodeDecodeError, AttributeError):
-                        # Special keys (arrows, etc.) - encode as readable tag
-                        if ch == b'\xe0':  # Extended key prefix
+                        if ch == b'\xe0':
                             ch2 = msvcrt.getch()
                             key = f"<special:{ch2[0]}>"
                         else:
@@ -150,7 +135,6 @@ class KeyboardListener:
                 time.sleep(0.1)
 
     def _listen_unix(self):
-        """Unix/Linux: use select + termios for non-blocking input."""
         import select
         import termios
         import tty
@@ -170,7 +154,6 @@ class KeyboardListener:
                     if r:
                         ch = sys.stdin.read(1)
                         if ch:
-                            # Translate common control characters
                             if ch == '\x03':       # Ctrl+C
                                 self._queue.put('<ctrl-c>')
                             elif ch == '\x1b':     # Escape
@@ -191,7 +174,6 @@ class KeyboardListener:
             self._restore_terminal()
 
     def _restore_terminal(self):
-        """Restore terminal to original settings."""
         if self._old_termios is not None and self._fd is not None:
             import termios
             try:
@@ -202,11 +184,9 @@ class KeyboardListener:
 
 
 # =============================================================================
-# Settings Menu Definition
+# Settings Menu Definition — UNCHANGED
 # =============================================================================
 
-# Each entry: (key, label, config_path, current_getter, formatter, parser)
-# config_path: dotted path within BotConfig, e.g. "strategy.bb_period"
 MenuEntry = Tuple[str, str, str, callable, callable, callable]
 
 MENU_ENTRIES: List[MenuEntry] = [
@@ -253,17 +233,16 @@ MENU_ENTRIES: List[MenuEntry] = [
 
 
 # =============================================================================
-# CLIDisplay Class
+# CLIDisplay Class — TERMINAL-ADAPTIVE REWRITE
 # =============================================================================
 
 class CLIDisplay:
     """
-    Rich-based interactive live CLI dashboard for the trading bot.
+    Professional, terminal-width-aware live CLI dashboard.
 
-    Features:
-    - Live updating price, balance, position, P&L panels
-    - Keyboard hotkeys for on-the-fly settings changes
-    - Interactive settings menu rendered within the live display
+    Automatically switches between wide (side-by-side panels) and narrow
+    (stacked vertical) layouts based on real terminal dimensions, making
+    the dashboard look pristine over SSH connections of any size.
     """
 
     def __init__(self, cfg: BotConfig):
@@ -273,14 +252,14 @@ class CLIDisplay:
 
         # ── Keyboard / interaction ──
         self._keyboard = KeyboardListener()
-        self._action_queue: queue.Queue = queue.Queue()  # Actions for the bot
+        self._action_queue: queue.Queue = queue.Queue()
         self._menu_mode: bool = False
-        self._menu_state: str = "main"       # "main" | "input"
+        self._menu_state: str = "main"
         self._menu_input_buffer: str = ""
         self._menu_selected_key: str = ""
-        self._menu_message: str = ""         # Success/error message
-        self._menu_msg_time: float = 0.0     # When message was set
-        self._help_overlay_until: float = 0.0  # Timestamp for help overlay
+        self._menu_message: str = ""
+        self._menu_msg_time: float = 0.0
+        self._help_overlay_until: float = 0.0
 
         # ── Data holders (updated by bot each cycle) ──
         self.current_price: float = 0.0
@@ -299,26 +278,34 @@ class CLIDisplay:
         self.risk_manager: Optional[RiskManager] = None
         self.recent_trades: List[TradeRecord] = []
 
+    # ─── Terminal width helper ────────────────────────────────────────────
+
+    @property
+    def _width(self) -> int:
+        """Detect terminal width, falling back to Rich console size."""
+        try:
+            cols, _ = shutil.get_terminal_size(fallback=(80, 24))
+            return max(60, cols)
+        except Exception:
+            return max(60, self.console.size.width)
+
+    @property
+    def _is_wide(self) -> bool:
+        return self._width >= WIDE_MIN_WIDTH
+
     # ─── Public API ──────────────────────────────────────────────────────
 
     def update_data(self, **kwargs):
         """Update display data from the bot loop."""
         for key, value in kwargs.items():
             if hasattr(self, key):
-                # Track previous price for direction arrow
                 if key == "current_price" and self.current_price != 0:
                     self.prev_price = self.current_price
                 setattr(self, key, value)
 
     @property
     def pending_actions(self) -> List[Tuple[str, Any]]:
-        """
-        Drain and return all pending actions for the bot to process.
-
-        Returns:
-            List of (action_type, payload) tuples.
-            Types: "pause", "resume", "update_config", "reset_daily"
-        """
+        """Drain and return all pending actions for the bot to process."""
         actions = []
         while not self._action_queue.empty():
             try:
@@ -330,18 +317,8 @@ class CLIDisplay:
     # ─── Display Lifecycle ───────────────────────────────────────────────
 
     def start_live_display(self):
-        """Start the live updating display and keyboard listener.
-
-        Uses console.clear() + console.print() instead of Rich Live widget
-        because Live's incremental diffing and ANSI escape sequences are
-        fundamentally unreliable over SSH connections — they cause extreme
-        flickering, stacking, and duplicate dashboard artifacts.
-
-        This approach sends a full clear-screen escape sequence followed by
-        one atomic renderable, guaranteeing zero flicker on any terminal.
-        """
+        """Start the live display and keyboard listener."""
         self._keyboard.start()
-        # Render the initial dashboard frame
         self.console.clear()
         self.console.print(self._generate_layout())
 
@@ -350,42 +327,30 @@ class CLIDisplay:
         self._keyboard.stop()
 
     def refresh(self):
-        """Refresh the display — clear screen and reprint full dashboard.
-
-        Unlike Rich Live (which diffs incrementally), this does a full
-        repaint.  A full terminal frame is ~4 KB which is negligible
-        even over slow SSH connections at 2-4 fps.
-        """
-        # Process any pending keystrokes
+        """Full repaint — clear screen + atomic render."""
         self._process_keystrokes()
-
-        # Clear screen (ANSI \033[2J\033[H) then print atomically
         self.console.clear()
         self.console.print(self._generate_layout())
 
     def tick(self):
-        """Lightweight tick: only process keystrokes, no render."""
+        """Lightweight tick: process keystrokes only, no render."""
         self._process_keystrokes()
 
     def shutdown(self):
-        """Full cleanup - restore terminal, stop keyboard listener."""
+        """Full cleanup."""
         self._keyboard.stop()
 
-    # ─── Keyboard / Interaction Handling ─────────────────────────────────
+    # ─── Keyboard / Interaction Handling — UNCHANGED ────────────────────
 
     def _process_keystrokes(self):
-        """Process all pending keystrokes from the keyboard listener."""
         keys = self._keyboard.drain()
         if not keys:
             return
-
         for key in keys:
             self._handle_key(key)
 
     def _handle_key(self, key: str):
-        """Handle a single keystroke."""
-
-        # ── Global hotkeys (work even when menu is closed) ──
+        # ── Global hotkeys ──
         if key == 'm' and not self._menu_mode:
             self._menu_mode = True
             self._menu_state = "main"
@@ -395,7 +360,6 @@ class CLIDisplay:
             return
 
         if key == 'p' and not self._menu_mode:
-            # Toggle pause
             if self.paused:
                 self._action_queue.put(("resume", None))
                 self._menu_message = "✅ Bot RESUMED"
@@ -413,12 +377,11 @@ class CLIDisplay:
             self._action_queue.put(("shutdown", None))
             return
 
-        # ── Menu keys (only when menu is open) ──
+        # ── Menu keys ──
         if not self._menu_mode:
             return
 
         if key in ('<esc>', 'q'):
-            # Close menu
             self._menu_mode = False
             self._menu_state = "main"
             self._menu_input_buffer = ""
@@ -427,14 +390,12 @@ class CLIDisplay:
             return
 
         if key == 'r':
-            # Reset daily stats (from menu)
             self._action_queue.put(("reset_daily", None))
             self._menu_message = "✅ Daily stats RESET"
             self._menu_msg_time = time.time()
             return
 
         if key == 'p' and self._menu_mode:
-            # Pause from menu
             if self.paused:
                 self._action_queue.put(("resume", None))
                 self._menu_message = "✅ Bot RESUMED"
@@ -453,7 +414,6 @@ class CLIDisplay:
                 if self._menu_input_buffer:
                     self._menu_input_buffer = self._menu_input_buffer[:-1]
                 else:
-                    # Go back to main menu
                     self._menu_state = "main"
                     self._menu_selected_key = ""
                 return
@@ -461,12 +421,10 @@ class CLIDisplay:
                 self._menu_input_buffer += key
                 return
             else:
-                # Ignore other keys in input mode
                 return
 
         # ── Main menu mode ──
         if self._menu_state == "main":
-            # Check if it's a menu entry key (1-9)
             for entry_key, label, path, getter, fmt, parser in MENU_ENTRIES:
                 if key == entry_key:
                     self._menu_state = "input"
@@ -480,7 +438,6 @@ class CLIDisplay:
             self._menu_state = "main"
             return
 
-        # Find the matching menu entry
         entry = None
         for e in MENU_ENTRIES:
             if e[0] == self._menu_selected_key:
@@ -506,15 +463,16 @@ class CLIDisplay:
             self._menu_message = f"❌ Invalid value: {e}"
             self._menu_msg_time = time.time()
 
-        # Return to main menu
         self._menu_state = "main"
         self._menu_selected_key = ""
         self._menu_input_buffer = ""
 
-    # ─── Layout Generation ───────────────────────────────────────────────
+    # ═════════════════════════════════════════════════════════════════════
+    #  LAYOUT GENERATION (terminal-adaptive)
+    # ═════════════════════════════════════════════════════════════════════
 
     def _generate_layout(self) -> Layout:
-        """Generate the full terminal layout (dashboard or menu)."""
+        """Generate layout — dashboard, menu, or help overlay."""
         if self._menu_mode:
             return self._generate_menu_layout()
         elif self._help_overlay_until > time.time():
@@ -523,27 +481,47 @@ class CLIDisplay:
             return self._generate_dashboard_layout()
 
     def _generate_dashboard_layout(self) -> Layout:
-        """Generate the standard trading dashboard layout."""
-        layout = Layout()
-        layout.split_column(
-            Layout(name="header", size=3),
-            Layout(name="body"),
-            Layout(name="footer", size=4),
-        )
-        layout["body"].split_row(
-            Layout(name="left", ratio=2),
-            Layout(name="right", ratio=3),
-        )
-        layout["left"].split_column(
-            Layout(name="price_balance"),
-            Layout(name="position"),
-            Layout(name="strategy_config"),
-        )
-        layout["right"].split_column(
-            Layout(name="pnl_signal"),
-            Layout(name="trades"),
-        )
+        """Terminal-adaptive trading dashboard.
 
+        Wide (≥100 cols):  price+balance left | position | strategy
+                            P&L+signal left     | trades
+                            — side-by-side columns, professional density.
+
+        Narrow (<100 cols): stacked single-column, every panel full-width.
+        """
+        layout = Layout()
+        w = self._width
+
+        if self._is_wide:
+            # ── WIDE: two-column professional layout ──
+            layout.split_column(
+                Layout(name="header",  size=3),
+                Layout(name="top_row"),
+                Layout(name="bottom_row"),
+                Layout(name="footer",  size=3),
+            )
+            layout["top_row"].split_row(
+                Layout(name="price_balance", ratio=3),
+                Layout(name="position",      ratio=2),
+                Layout(name="strategy_config", ratio=2),
+            )
+            layout["bottom_row"].split_row(
+                Layout(name="pnl_signal", ratio=1),
+                Layout(name="trades",     ratio=1),
+            )
+        else:
+            # ── NARROW: single-column stacked ──
+            layout.split_column(
+                Layout(name="header",  size=3),
+                Layout(name="price_balance"),
+                Layout(name="position"),
+                Layout(name="pnl_signal"),
+                Layout(name="strategy_config"),
+                Layout(name="trades"),
+                Layout(name="footer",  size=3),
+            )
+
+        # Fill every region — panels auto-adapt internally
         layout["header"].update(self._header_panel())
         layout["price_balance"].update(self._price_balance_panel())
         layout["position"].update(self._position_panel())
@@ -554,12 +532,10 @@ class CLIDisplay:
 
         return layout
 
-    # ─── Help Overlay ────────────────────────────────────────────────────
+    # ─── Help Overlay — UNCHANGED ───────────────────────────────────────
 
     def _generate_help_layout(self) -> Layout:
-        """Show a help overlay with all available hotkeys."""
         layout = Layout()
-
         help_text = Text()
         help_text.append("\n")
         help_text.append("  🎮  COMMAND REFERENCE\n\n", style="bold bright_cyan")
@@ -580,7 +556,6 @@ class CLIDisplay:
         help_text.append("Return to dashboard\n", style="dim")
         help_text.append("  [R]  Reset Daily Stats   ", style="bold yellow")
         help_text.append("Clear today's counters\n", style="dim")
-
         panel = Panel(
             help_text,
             title="🆘 HELP",
@@ -591,47 +566,36 @@ class CLIDisplay:
         layout.update(panel)
         return layout
 
-    # ─── Menu Layout ─────────────────────────────────────────────────────
+    # ─── Menu Layout — UNCHANGED ────────────────────────────────────────
 
     def _generate_menu_layout(self) -> Layout:
-        """Generate the interactive settings menu layout."""
         layout = Layout()
         layout.split_column(
             Layout(name="menu_header", size=3),
             Layout(name="menu_body"),
             Layout(name="menu_footer", size=4),
         )
-
         layout["menu_header"].update(self._menu_header_panel())
         layout["menu_body"].update(self._menu_body_panel())
         layout["menu_footer"].update(self._menu_footer_panel())
-
         return layout
 
     def _menu_header_panel(self) -> Panel:
-        """Header for the settings menu."""
         text = Text()
         text.append(" ⚙️  ", style="bold")
         text.append("SETTINGS MENU", style="bold bright_cyan")
-
-        if self._menu_message:
-            # Show message for ~2 seconds
-            if time.time() - self._menu_msg_time < 2.0:
-                text.append("  —  ")
-                text.append(self._menu_message, style="bold yellow")
-
+        if self._menu_message and (time.time() - self._menu_msg_time) < 2.0:
+            text.append("  —  ")
+            text.append(self._menu_message, style="bold yellow")
         if self.paused:
             text.append("  |  ")
             text.append("⏸️ PAUSED", style="bold bright_red")
-
         return Panel(text, border_style="bright_cyan", title_align="left")
 
     def _menu_body_panel(self) -> Panel:
-        """Body of the settings menu - shows all options."""
         if self._menu_state == "input":
             return self._menu_input_panel()
 
-        # Main menu: show all settings
         lines = []
         lines.append("")
         lines.append("  📊  STRATEGY PARAMETERS")
@@ -667,8 +631,6 @@ class CLIDisplay:
         return Panel(text, border_style="")
 
     def _menu_input_panel(self) -> Panel:
-        """Panel shown when editing a specific setting."""
-        # Find the selected menu entry
         entry = None
         for e in MENU_ENTRIES:
             if e[0] == self._menu_selected_key:
@@ -690,16 +652,14 @@ class CLIDisplay:
         lines.append(f"  New value: [bold bright_green]{self._menu_input_buffer}_[/bold bright_green]")
         lines.append("")
 
-        if self._menu_message and time.time() - self._menu_msg_time < 2.0:
+        if self._menu_message and (time.time() - self._menu_msg_time) < 2.0:
             lines.append(f"  {self._menu_message}")
 
         text = Text("\n".join(lines), style="white")
         return Panel(text, border_style="", title="✏️ EDIT SETTING", title_align="center")
 
     def _menu_footer_panel(self) -> Panel:
-        """Footer with context-sensitive instructions."""
         text = Text()
-
         if self._menu_state == "input":
             text.append(" [Enter] Confirm  ", style="bold green on grey11")
             text.append(" [Esc] Cancel  ", style="bold red on grey11")
@@ -709,17 +669,15 @@ class CLIDisplay:
             text.append(" [P] Pause/Resume  ", style="bold yellow on grey11")
             text.append(" [R] Reset Daily  ", style="bold yellow on grey11")
             text.append(" [Q/Esc] Close Menu  ", style="bold red on grey11")
-
-        if self._menu_message and time.time() - self._menu_msg_time < 3.0:
-            # Already shown in body for input mode, or in header
-            pass
-
         return Panel(text, border_style="dim")
 
-    # ─── Dashboard Panels (existing, mostly unchanged) ───────────────────
+
+    # ═════════════════════════════════════════════════════════════════════
+    #  DASHBOARD PANELS (all terminal-width-aware)
+    # ═════════════════════════════════════════════════════════════════════
 
     def _header_panel(self) -> Panel:
-        """Header with bot name, status, and time."""
+        """Header bar — adapts to terminal width by compacting labels."""
         now = datetime.now(IST)
         runtime = time.time() - self._start_time
         hours = int(runtime // 3600)
@@ -730,27 +688,43 @@ class CLIDisplay:
             "red" if "ERROR" in self.bot_status else "yellow"
         )
 
+        w = self._width
+        compact = w < 85
+
         text = Text()
         text.append(" 🤖 ", style="bold")
-        text.append("BOLLINGER BAND REVERSAL BOT", style="bold bright_cyan")
-        text.append("  |  ", style="dim")
-        text.append(f"Status: ", style="dim")
-        text.append(f"{self.bot_status}", style=f"bold {status_color}")
+        if compact:
+            text.append("BB REVERSAL BOT", style="bold bright_cyan")
+        else:
+            text.append("BOLLINGER BAND REVERSAL BOT", style="bold bright_cyan")
+
+        text.append("  │  ", style="dim")
+
+        if compact:
+            text.append(f"{self.bot_status[:6]}", style=f"bold {status_color}")
+        else:
+            text.append(f"Status: ", style="dim")
+            text.append(f"{self.bot_status}", style=f"bold {status_color}")
 
         if self.paused:
-            text.append("  |  ", style="dim")
-            text.append("⏸️ PAUSED", style="bold bright_red")
+            text.append(" ⏸", style="bold bright_red")
 
-        text.append("  |  ", style="dim")
-        text.append("24/7 LIVE", style="bold green")
-        text.append("  |  ", style="dim")
-        text.append(f"{now.strftime('%Y-%m-%d %H:%M:%S')} IST", style="bold white")
-        text.append("  |  ", style="dim")
-        text.append(f"Uptime: {hours:02d}:{mins:02d}:{secs:02d}", style="cyan")
+        if not compact:
+            text.append("  │  ", style="dim")
+            text.append("24/7 LIVE", style="bold green")
+            text.append("  │  ", style="dim")
+            text.append(f"{now.strftime('%H:%M:%S')} IST", style="bold white")
+            text.append("  │  ", style="dim")
+            text.append(f"Up {hours:02d}:{mins:02d}:{secs:02d}", style="cyan")
+        else:
+            text.append("  │  ", style="dim")
+            text.append(f"{now.strftime('%H:%M:%S')}", style="bold white")
+            text.append("  │  ", style="dim")
+            text.append(f"{hours:02d}:{mins:02d}:{secs:02d}", style="cyan")
 
         if self.paper_trading:
-            text.append("  |  ", style="dim")
-            text.append("📝 PAPER", style="bold yellow")
+            text.append("  │  ", style="dim")
+            text.append("PAPER", style="bold yellow")
 
         return Panel(
             Align.center(text),
@@ -759,250 +733,402 @@ class CLIDisplay:
         )
 
     def _price_balance_panel(self) -> Panel:
-        """Live price ticker and account balance."""
-        layout = Layout()
-        layout.split_row(
-            Layout(name="price", ratio=2),
-            Layout(name="balance", ratio=1),
-        )
+        """Price ticker + balance — side-by-side on wide, stacked on narrow."""
+        w = self._width
 
-        # Price display
-        price_text = Text()
-        price_text.append("BTC/USDT  ", style="dim")
-        if self.current_price > 0:
-            direction = "▲" if self.current_price >= self.prev_price else "▼"
-            dir_color = "bright_green" if self.current_price >= self.prev_price else "bright_red"
-            price_text.append(f"{direction} ", style=f"bold {dir_color}")
-            price_text.append(f"${self.current_price:,.2f}", style="bold bright_white")
+        if self._is_wide:
+            # ── WIDE: price and balance in one horizontal panel ──
+            inner = Layout()
+            inner.split_row(
+                Layout(name="price", ratio=3),
+                Layout(name="balance", ratio=2),
+            )
+
+            # Price block
+            price_text = Text()
+            price_text.append("BTC/USDT  ", style="dim")
+            if self.current_price > 0:
+                direction = "▲" if self.current_price >= self.prev_price else "▼"
+                dir_color = "bright_green" if self.current_price >= self.prev_price else "bright_red"
+                price_text.append(f"{direction} ", style=f"bold {dir_color}")
+                price_text.append(f"${self.current_price:,.2f}", style="bold bright_white")
+            else:
+                price_text.append("Loading...", style="dim yellow")
+            inner["price"].update(Panel(price_text, title="💹 Live Price",
+                                        border_style="green", title_align="left"))
+
+            # Balance block
+            balance_table = self._build_balance_table()
+            inner["balance"].update(Panel(balance_table, title="💰 Balance",
+                                          border_style="green", title_align="left"))
+            return Panel(inner, border_style="")
         else:
-            price_text.append("Loading...", style="dim yellow")
+            # ── NARROW: price and balance as separate rows in one panel ──
+            lines = []
+            if self.current_price > 0:
+                direction = "▲" if self.current_price >= self.prev_price else "▼"
+                dir_mark = "green" if self.current_price >= self.prev_price else "red"
+                lines.append(Text.assemble(
+                    ("BTC/USDT  ", "dim"),
+                    (f"{direction} ${self.current_price:,.2f}", f"bold {dir_mark}"),
+                ))
+            else:
+                lines.append(Text("BTC/USDT  Loading...", style="dim yellow"))
 
-        layout["price"].update(Panel(price_text, title="💹 Live Price", border_style="green",
-                                     title_align="left"))
+            lines.append(Text(""))  # spacer
 
-        # Balance
-        balance_table = Table(box=None, show_header=False, padding=(0, 1))
-        balance_table.add_column("Asset", style="dim", width=6)
-        balance_table.add_column("Amount", style="bold", justify="right")
-
-        if self.balance:
+            # Compact balance: "INR ₹1,941.50  |  USDT $22.31"
+            bal_parts = []
             for asset, amount in sorted(self.balance.items()):
                 if isinstance(amount, (int, float)) and amount > 0:
-                    balance_table.add_row(asset, f"{amount:,.4f}")
+                    if asset == "INR":
+                        bal_parts.append(f"INR ₹{amount:,.2f}")
+                    elif amount >= 100:
+                        bal_parts.append(f"{asset} {amount:,.2f}")
+                    else:
+                        bal_parts.append(f"{asset} {amount:,.4f}")
+            if bal_parts:
+                lines.append(Text("  │  ".join(bal_parts), style="bold white"))
+            else:
+                lines.append(Text("Balance: ---", style="dim"))
+
+            # BB band summary (compact)
+            if self.bb_result and self.bb_result.sma > 0:
+                bb = self.bb_result
+                lines.append(Text(""))
+                lines.append(Text.assemble(
+                    ("BB: ", "dim"),
+                    (f"U ${bb.upper:,.2f}  ", "bright_red"),
+                    (f"M ${bb.sma:,.2f}  ", "white"),
+                    (f"L ${bb.lower:,.2f}  ", "bright_green"),
+                    (f"W ${bb.width:,.2f}", "dim"),
+                ))
+
+            contents = Text("\n").join(lines) if len(lines) > 1 else lines[0]
+            return Panel(contents, title="💹 Price & Balance", border_style="green",
+                         title_align="left")
+
+    def _build_balance_table(self) -> Table:
+        """Shared balance table builder used by wide layout."""
+        table = Table(box=None, show_header=False, padding=(0, 1))
+        table.add_column("Asset", style="dim", width=6)
+        table.add_column("Amount", style="bold", justify="right")
+
+        if self.balance:
+            shown = 0
+            for asset, amount in sorted(self.balance.items()):
+                if isinstance(amount, (int, float)) and amount > 0:
+                    if asset == "INR":
+                        table.add_row(asset, f"₹{amount:,.2f}")
+                    elif amount >= 100:
+                        table.add_row(asset, f"{amount:,.2f}")
+                    else:
+                        table.add_row(asset, f"{amount:,.4f}")
+                    shown += 1
+            if shown == 0:
+                table.add_row("---", "Empty")
         else:
-            balance_table.add_row("USDT", "---")
-            balance_table.add_row("BTC", "---")
-
-        layout["balance"].update(Panel(balance_table, title="💰 Balance", border_style="green",
-                                       title_align="left"))
-
-        return Panel(layout, border_style="")
+            table.add_row("---", "Loading")
+        return table
 
     def _position_panel(self) -> Panel:
-        """Active position details."""
+        """Active position — detailed table on wide, summary line on narrow."""
         if not self.position:
             return Panel(
                 Align.center(Text("No active position", style="dim")),
-                title="📊 Current Position",
+                title="📊 Position",
                 border_style="blue",
                 title_align="left",
             )
 
         pos = self.position
-        table = Table(box=None, show_header=False, padding=(0, 1))
-        table.add_column("Label", style="dim", width=12)
-        table.add_column("Value", style="bold")
+        w = self._width
 
-        # Side
-        side_color = "bright_green" if pos.side == "LONG" else "bright_red"
-        table.add_row("Side", Text(pos.side, style=side_color))
-        table.add_row("Entry Price", Text(f"${pos.entry_price:,.2f}", style="white"))
-        table.add_row("Quantity", Text(f"{pos.quantity:,.6f} BTC", style="white"))
-        table.add_row("Current Price", Text(f"${self.current_price:,.2f}", style="white"))
+        if self._is_wide:
+            table = Table(box=None, show_header=False, padding=(0, 1))
+            table.add_column("", style="dim", width=14)
+            table.add_column("", style="bold")
 
-        # Unrealized P&L
-        if pos.unrealized_pnl_pct != 0:
-            pnl_color = "bright_green" if pos.unrealized_pnl_pct > 0 else "bright_red"
-            pnl_sign = "+" if pos.unrealized_pnl_pct > 0 else ""
-            table.add_row("Unreal. P&L %",
-                         Text(f"{pnl_sign}{pos.unrealized_pnl_pct:.2f}%", style=f"bold {pnl_color}"))
+            side_color = "bright_green" if pos.side == "LONG" else "bright_red"
+            table.add_row("Side", Text(pos.side, style=side_color))
+            table.add_row("Entry Price", f"${pos.entry_price:,.2f}")
+            table.add_row("Quantity", f"{pos.quantity:,.6f} BTC")
+            table.add_row("Current Price", f"${self.current_price:,.2f}")
 
-        # Trailing stop
-        table.add_row("Trail Stop", Text(f"${pos.trailing_stop:,.2f}", style="bright_yellow"))
-        table.add_row("Highest Price", Text(f"${pos.highest_price:,.2f}", style="bright_green"))
-        table.add_row("Lowest Price", Text(f"${pos.lowest_price:,.2f}", style="bright_green"))
+            if pos.unrealized_pnl_pct != 0:
+                pnl_color = "bright_green" if pos.unrealized_pnl_pct > 0 else "bright_red"
+                pnl_sign = "+" if pos.unrealized_pnl_pct > 0 else ""
+                table.add_row("Unreal. P&L %",
+                             Text(f"{pnl_sign}{pos.unrealized_pnl_pct:.2f}%",
+                                  style=f"bold {pnl_color}"))
 
-        # Entry time
-        entry_dt = datetime.fromtimestamp(pos.entry_time, tz=IST)
-        table.add_row("Entry Time",
-                     Text(entry_dt.strftime("%Y-%m-%d %H:%M:%S IST"), style="white"))
+            table.add_row("Trail Stop", f"${pos.trailing_stop:,.2f}")
+            table.add_row("Peak High", f"${pos.highest_price:,.2f}")
+            table.add_row("Peak Low", f"${pos.lowest_price:,.2f}")
 
-        return Panel(table, title="📊 Current Position", border_style="blue",
-                    title_align="left")
+            entry_dt = datetime.fromtimestamp(pos.entry_time, tz=IST)
+            table.add_row("Entry Time", entry_dt.strftime("%H:%M:%S IST"))
+
+            return Panel(table, title="📊 Current Position", border_style="blue",
+                         title_align="left")
+        else:
+            # ── Narrow: compact two-line format ──
+            side_color = "bright_green" if pos.side == "LONG" else "bright_red"
+            pnl_pct = pos.unrealized_pnl_pct
+            pnl_color = "bright_green" if pnl_pct >= 0 else "bright_red"
+            pnl_sign = "+" if pnl_pct >= 0 else ""
+
+            lines = []
+            lines.append(Text.assemble(
+                (f"{pos.side} ", f"bold {side_color}"),
+                (f"@{pos.entry_price:,.2f}  ", "white"),
+                (f"Qty: {pos.quantity:,.6f} BTC  ", "dim"),
+                (f"Now: ${self.current_price:,.2f}", "white"),
+            ))
+            lines.append(Text.assemble(
+                (f"Trail: ${pos.trailing_stop:,.2f}  ", "bright_yellow"),
+                (f"P&L: {pnl_sign}{pnl_pct:.2f}%  ", f"bold {pnl_color}"),
+                (f"Hi: ${pos.highest_price:,.2f}  ", "bright_green"),
+                (f"Lo: ${pos.lowest_price:,.2f}", "bright_green"),
+            ))
+
+            text = Text("\n").join(lines)
+            return Panel(text, title="📊 Current Position", border_style="blue",
+                         title_align="left")
 
     def _strategy_config_panel(self) -> Panel:
-        """Show current strategy configuration."""
+        """Strategy config — left-aligned rows; denser on narrow terminals."""
         st = self.cfg.strategy
         rk = self.cfg.risk
+        w = self._width
 
-        lines = []
-        lines.append(f"  BB Period:        {st.bb_period}")
-        lines.append(f"  BB Std Dev:       {st.bb_stddev}")
-        lines.append(f"  Near Threshold:   {st.near_threshold*100:.1f}%")
-        lines.append(f"  Trail Stop:       {st.trail_pct*100:.1f}%")
-        lines.append(f"  Trade Size:       ₹{rk.trade_size_inr:,.0f}")
-        lines.append(f"  USD/INR Rate:     ₹{rk.usd_inr_rate}")
-        lines.append(f"  Max Daily Loss:   ₹{rk.max_daily_loss_inr:,.0f}")
-        lines.append(f"  Max Trades/Day:   {rk.max_trades_per_day}")
-        lines.append(f"  Poll Interval:    {self.cfg.poll_interval_sec}s")
-        lines.append(f"  Exchange:         SharkEx v1")
-        lines.append(f"  Strategy:         24/7 BB Reversal")
+        if self._is_wide:
+            lines = [
+                f"  BB Period:        {st.bb_period}",
+                f"  BB Std Dev:       {st.bb_stddev}",
+                f"  Near Threshold:   {st.near_threshold*100:.1f}%",
+                f"  Trail Stop:       {st.trail_pct*100:.1f}%",
+                f"  Trade Size:       ₹{rk.trade_size_inr:,.0f}",
+                f"  USD/INR Rate:     ₹{rk.usd_inr_rate}",
+                f"  Max Daily Loss:   ₹{rk.max_daily_loss_inr:,.0f}",
+                f"  Max Trades/Day:   {rk.max_trades_per_day}",
+                f"  Poll Interval:    {self.cfg.poll_interval_sec}s",
+                f"  Exchange:         SharkEx v1",
+                f"  Strategy:         24/7 BB Reversal",
+            ]
+        else:
+            # Compact: 3 columns of small items
+            lines = [
+                f"BB({st.bb_period},{st.bb_stddev}σ)  Near:{st.near_threshold*100:.1f}%  Trail:{st.trail_pct*100:.1f}%",
+                f"Trade: ₹{rk.trade_size_inr:,.0f}  USD/INR: ₹{rk.usd_inr_rate}  MaxLoss: ₹{rk.max_daily_loss_inr:,.0f}",
+                f"Max {rk.max_trades_per_day}/day  Poll: {self.cfg.poll_interval_sec}s  SharkEx v1",
+            ]
 
         text = Text("\n".join(lines), style="cyan")
         return Panel(text, title="⚙️ Strategy Config", border_style="magenta",
-                    title_align="left")
+                     title_align="left")
 
     def _pnl_signal_panel(self) -> Panel:
-        """P&L summary and latest signal info."""
-        layout = Layout()
-        layout.split_row(
-            Layout(name="pnl"),
-            Layout(name="signal"),
-        )
+        """P&L + Signal — side-by-side on wide, stacked on narrow."""
+        if self._is_wide:
+            inner = Layout()
+            inner.split_row(
+                Layout(name="pnl"),
+                Layout(name="signal"),
+            )
 
-        # P&L sub-panel
-        pnl_table = Table(box=None, show_header=False, padding=(0, 1))
-        pnl_table.add_column("Label", style="dim", width=16)
-        pnl_table.add_column("Value", style="bold")
+            # P&L sub-panel
+            pnl_table = Table(box=None, show_header=False, padding=(0, 1))
+            pnl_table.add_column("", style="dim", width=16)
+            pnl_table.add_column("", style="bold")
 
-        if self.risk_manager:
-            pnl_table.add_row("Daily P&L (USDT)",
-                            Text(f"${self.risk_manager.daily_pnl_usdt:+,.2f}",
-                                 style="bold bright_green" if self.risk_manager.daily_pnl_usdt >= 0 else "bold bright_red"))
-            pnl_table.add_row("Daily P&L (INR)",
-                            Text(f"₹{self.risk_manager.daily_pnl_inr:+,.2f}",
-                                 style="bold bright_green" if self.risk_manager.daily_pnl_inr >= 0 else "bold bright_red"))
-            pnl_table.add_row("Trades Today",
-                            Text(f"{self.risk_manager.trades_today}/{self.cfg.risk.max_trades_per_day}",
-                                 style="bold white"))
-            pnl_table.add_row("Max Loss Limit",
-                            Text(f"₹{self.cfg.risk.max_daily_loss_inr:,.0f}", style="yellow"))
+            if self.risk_manager:
+                rm = self.risk_manager
+                pnl_usdt_color = "bold bright_green" if rm.daily_pnl_usdt >= 0 else "bold bright_red"
+                pnl_inr_color = "bold bright_green" if rm.daily_pnl_inr >= 0 else "bold bright_red"
+                pnl_table.add_row("Daily P&L (USDT)",
+                                 Text(f"${rm.daily_pnl_usdt:+,.2f}", style=pnl_usdt_color))
+                pnl_table.add_row("Daily P&L (INR)",
+                                 Text(f"₹{rm.daily_pnl_inr:+,.2f}", style=pnl_inr_color))
+                pnl_table.add_row("Trades Today",
+                                 f"{rm.trades_today}/{self.cfg.risk.max_trades_per_day}")
+                pnl_table.add_row("Max Loss Limit",
+                                 f"₹{self.cfg.risk.max_daily_loss_inr:,.0f}")
 
-            if self.risk_manager.is_locked:
-                pnl_table.add_row("", "")
-                pnl_table.add_row("STATUS", Text("🔒 LOCKED", style="bold bright_red"))
-                pnl_table.add_row("Reason", Text(self.risk_manager.lock_reason, style="red"))
-            else:
-                pnl_table.add_row("STATUS", Text("✅ ACTIVE", style="bold bright_green"))
+                if rm.is_locked:
+                    pnl_table.add_row("", "")
+                    pnl_table.add_row("STATUS", Text("🔒 LOCKED", style="bold bright_red"))
+                    pnl_table.add_row("Reason", Text(rm.lock_reason, style="red"))
+                else:
+                    pnl_table.add_row("STATUS", Text("✅ ACTIVE", style="bold bright_green"))
 
-        layout["pnl"].update(Panel(pnl_table, title="📈 P&L Summary", border_style="green",
-                                   title_align="left"))
+            inner["pnl"].update(Panel(pnl_table, title="📈 P&L Summary",
+                                       border_style="green", title_align="left"))
 
-        # Signal sub-panel
-        signal_table = Table(box=None, show_header=False, padding=(0, 1))
-        signal_table.add_column("Label", style="dim", width=16)
-        signal_table.add_column("Value", style="bold")
+            # Signal sub-panel
+            sig = self._build_signal_subpanel()
+            inner["signal"].update(Panel(sig, title="🎯 Signal & BB",
+                                          border_style="yellow", title_align="left"))
 
-        signal_color = {
-            "LONG": "bold bright_green",
-            "SHORT": "bold bright_red",
-            "NONE": "dim white",
-        }.get(self.signal, "white")
-        signal_emoji = {
-            "LONG": "🟢",
-            "SHORT": "🔴",
-            "NONE": "⚪",
-        }.get(self.signal, "⚪")
+            return Panel(inner, border_style="")
+        else:
+            # ── Narrow: stacked P&L then signal ──
+            lines = []
+            if self.risk_manager:
+                rm = self.risk_manager
+                pnl_color = "green" if rm.daily_pnl_inr >= 0 else "red"
+                pnl_sign = "+" if rm.daily_pnl_inr >= 0 else ""
+                status = "🔒LOCKED" if rm.is_locked else "✅ACTIVE"
+                lines.append(
+                    f"P&L: {pnl_sign}₹{rm.daily_pnl_inr:,.2f}  "
+                    f"Trades: {rm.trades_today}/{self.cfg.risk.max_trades_per_day}  "
+                    f"{status}"
+                )
+                if rm.is_locked:
+                    lines.append(f"Lock: {rm.lock_reason}")
 
-        signal_table.add_row("Last Signal",
-                           Text(f"{signal_emoji} {self.signal}", style=signal_color))
+            # Signal
+            signal_color = {"LONG": "bright_green", "SHORT": "bright_red",
+                           "NONE": "dim"}.get(self.signal, "white")
+            signal_emoji = {"LONG": "🟢", "SHORT": "🔴", "NONE": "⚪"}.get(self.signal, "⚪")
+            lines.append(f"Signal: {signal_emoji} {self.signal}")
+            if self.signal_reason:
+                lines.append(f"  {self.signal_reason}")
+
+            if self.bb_result and self.bb_result.sma > 0:
+                bb = self.bb_result
+                lines.append(
+                    f"BB: U ${bb.upper:,.2f}  M ${bb.sma:,.2f}  L ${bb.lower:,.2f}  "
+                    f"W ${bb.width:,.2f}"
+                )
+
+            return Panel(Text("\n".join(lines), style="white"),
+                         title="📈 P&L & Signal", border_style="green",
+                         title_align="left")
+
+    def _build_signal_subpanel(self) -> Table:
+        """Shared signal/BB table used by wide layout."""
+        table = Table(box=None, show_header=False, padding=(0, 1))
+        table.add_column("", style="dim", width=16)
+        table.add_column("", style="bold")
+
+        signal_color = {"LONG": "bold bright_green", "SHORT": "bold bright_red",
+                       "NONE": "dim white"}.get(self.signal, "white")
+        signal_emoji = {"LONG": "🟢", "SHORT": "🔴", "NONE": "⚪"}.get(self.signal, "⚪")
+
+        table.add_row("Last Signal",
+                     Text(f"{signal_emoji} {self.signal}", style=signal_color))
         if self.last_signal_distance:
-            signal_table.add_row("Band Distance",
-                               Text(f"{self.last_signal_distance:.3f}%", style="cyan"))
+            table.add_row("Band Distance",
+                         f"{self.last_signal_distance:.3f}%")
         if self.signal_reason:
-            signal_table.add_row("Reason",
-                               Text(self.signal_reason, style="dim"))
+            table.add_row("Reason", Text(self.signal_reason, style="dim"))
 
         if self.bb_result and self.bb_result.sma > 0:
-            signal_table.add_row("", "")
-            signal_table.add_row("BB Upper",
-                               Text(f"${self.bb_result.upper:,.2f}", style="bright_red"))
-            signal_table.add_row("BB SMA",
-                               Text(f"${self.bb_result.sma:,.2f}", style="white"))
-            signal_table.add_row("BB Lower",
-                               Text(f"${self.bb_result.lower:,.2f}", style="bright_green"))
-            signal_table.add_row("BB Width",
-                               Text(f"${self.bb_result.width:,.2f}", style="dim"))
-            signal_table.add_row("Volatility σ",
-                               Text(f"${self.bb_result.volatility:,.2f}", style="dim"))
+            bb = self.bb_result
+            table.add_row("", "")
+            table.add_row("BB Upper", Text(f"${bb.upper:,.2f}", style="bright_red"))
+            table.add_row("BB SMA",   Text(f"${bb.sma:,.2f}", style="white"))
+            table.add_row("BB Lower", Text(f"${bb.lower:,.2f}", style="bright_green"))
+            table.add_row("BB Width", f"${bb.width:,.2f}")
+            table.add_row("Volatility σ", f"${bb.volatility:,.2f}")
 
-        layout["signal"].update(Panel(signal_table, title="🎯 Signal & BB", border_style="yellow",
-                                      title_align="left"))
-
-        return Panel(layout, border_style="")
+        return table
 
     def _trades_panel(self) -> Panel:
-        """Recent trade log."""
-        table = Table(
-            box=box.SIMPLE,
-            show_header=True,
-            header_style="bold cyan",
-            padding=(0, 1),
-        )
-        table.add_column("#", style="dim", width=4)
-        table.add_column("Side", width=6)
-        table.add_column("Entry", width=10)
-        table.add_column("Exit", width=10)
-        table.add_column("Qty", width=8)
-        table.add_column("PnL (₹)", width=12)
-        table.add_column("Reason", width=8)
+        """Recent trades — full table on wide, compact on narrow."""
+        w = self._width
+
+        if self._is_wide:
+            table = Table(
+                box=box.SIMPLE,
+                show_header=True,
+                header_style="bold cyan",
+                padding=(0, 1),
+            )
+            table.add_column("#", style="dim", width=4)
+            table.add_column("Side", width=6)
+            table.add_column("Entry", width=10)
+            table.add_column("Exit", width=10)
+            table.add_column("Qty", width=8)
+            table.add_column("PnL (₹)", width=12)
+            table.add_column("Reason", width=8)
+        else:
+            # Narrow: drop Exit and Reason columns to fit
+            table = Table(
+                box=box.SIMPLE,
+                show_header=True,
+                header_style="bold cyan",
+                padding=(0, 1),
+            )
+            table.add_column("#", style="dim", width=3)
+            table.add_column("Side", width=5)
+            table.add_column("Entry", width=10)
+            table.add_column("Qty", width=7)
+            table.add_column("PnL (₹)", width=12)
 
         if not self.recent_trades:
-            table.add_row("", "", "", "", "", "No trades yet", "")
+            table.add_row("", "", "", "", "No trades yet", "", "")
         else:
-            for t in self.recent_trades[-10:][::-1]:  # Last 10, newest first
+            displayed = self.recent_trades[-10:][::-1]
+            for t in displayed:
                 side_color = "bright_green" if t.side in ("LONG", "BUY") else "bright_red"
                 pnl_color = "bright_green" if t.pnl_usdt > 0 else "bright_red"
                 pnl_sign = "+" if t.pnl_usdt >= 0 else ""
 
-                table.add_row(
-                    str(t.id),
-                    Text(t.side, style=side_color),
-                    f"${t.entry_price:,.2f}",
-                    f"${t.exit_price:,.2f}",
-                    f"{t.quantity:,.6f}",
-                    Text(f"{pnl_sign}₹{t.pnl_inr:,.2f}", style=pnl_color),
-                    t.exit_reason,
-                )
+                if self._is_wide:
+                    table.add_row(
+                        str(t.id),
+                        Text(t.side, style=side_color),
+                        f"${t.entry_price:,.2f}",
+                        f"${t.exit_price:,.2f}",
+                        f"{t.quantity:,.6f}",
+                        Text(f"{pnl_sign}₹{t.pnl_inr:,.2f}", style=pnl_color),
+                        t.exit_reason,
+                    )
+                else:
+                    table.add_row(
+                        str(t.id),
+                        Text(t.side, style=side_color),
+                        f"${t.entry_price:,.2f}",
+                        f"{t.quantity:,.6f}",
+                        Text(f"{pnl_sign}₹{t.pnl_inr:,.2f}", style=pnl_color),
+                    )
 
-        return Panel(table, title="📋 Recent Trade Log", border_style="yellow",
-                    title_align="left")
+        max_rows = 12 if self._is_wide else 8
+        return Panel(table, title=f"📋 Recent Trades (last {max_rows})",
+                     border_style="yellow", title_align="left")
 
     def _footer_panel(self) -> Panel:
-        """Footer with cycle info, errors, hotkey hints, and session times."""
+        """Footer — hotkey bar + cycle info; adapts to width."""
+        w = self._width
+
         text = Text()
 
-        # Hotkey hints (prominent)
-        text.append(" [M]enu  ", style="bold cyan on grey11")
-        text.append(" [P]ause  ", style="bold yellow on grey11")
-        text.append(" [H]elp  ", style="bold white on grey11")
-        text.append(" [Ctrl+C] Quit  ", style="bold red on grey11")
-        text.append("│  ", style="dim")
+        if w >= 90:
+            text.append(" [M]enu  ", style="bold cyan on grey11")
+            text.append(" [P]ause  ", style="bold yellow on grey11")
+            text.append(" [H]elp  ", style="bold white on grey11")
+            text.append(" [Ctrl+C] Quit  ", style="bold red on grey11")
+            text.append("│  ", style="dim")
+            text.append(f"Cycle #{self.cycle_count}  │  ", style="dim")
+            text.append(f"{self.cfg.poll_interval_sec}s  │  ", style="dim")
+            text.append(f"BB({self.cfg.strategy.bb_period},{self.cfg.strategy.bb_stddev}σ)", style="dim")
+        else:
+            text.append(" [M]enu  [P]ause  [H]elp  [Ctrl+C] Quit", style="bold cyan on grey11")
+            text.append(f"  │  Cycle #{self.cycle_count}  {self.cfg.poll_interval_sec}s",
+                        style="dim")
 
-        text.append(f"Cycle: #{self.cycle_count}  |  ", style="dim")
-        text.append(f"Interval: {self.cfg.poll_interval_sec}s  |  ", style="dim")
-        text.append(f"24/7 Trading | BB({self.cfg.strategy.bb_period}, {self.cfg.strategy.bb_stddev}σ)  ", style="dim")
-
-        # Flash message (pause/resume notification)
-        if self._menu_message and time.time() - self._menu_msg_time < 2.5 and not self._menu_mode:
+        # Flash message
+        if self._menu_message and (time.time() - self._menu_msg_time) < 2.5 and not self._menu_mode:
             text.append(f"\n  {self._menu_message}", style="bold yellow")
 
         if self.last_error:
-            text.append(f"\n⚠️  Last Error: {self.last_error}", style="bold red")
+            text.append(f"\n⚠️  {self.last_error}", style="bold red")
 
         return Panel(text, box=box.SIMPLE, border_style="dim")
 
-    # ─── Static Print Methods (for non-live mode / logging) ──────────────
+    # ─── Static Print Methods ────────────────────────────────────────────
 
     def print_status_line(self, msg: str, style: str = "white"):
         """Print a single status line."""
