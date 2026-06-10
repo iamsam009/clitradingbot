@@ -232,7 +232,7 @@ class TradingBot:
             # Fetch OHLCV
             ohlcv = self.exchange.fetch_ohlcv(
                 timeframe=self.cfg.strategy.candle_tf,
-                limit=self.cfg.strategy.data_window,
+                limit=self.cfg.strategy.candles_window,
             )
             if not ohlcv or len(ohlcv) < self.cfg.strategy.bb_period:
                 logger.warning(f"Insufficient OHLCV data: {len(ohlcv) if ohlcv else 0} candles")
@@ -403,8 +403,11 @@ class TradingBot:
             # Calculate initial trailing stop
             self.position.trailing_stop_price = self.strategy.calculate_initial_stop(self.position)
 
-            # Place stop-loss order
-            self._place_stop_order()
+            # Place stop-loss order (only if trailing stop is enabled)
+            if self.cfg.strategy.trailing_stop_enabled:
+                self._place_stop_order()
+            else:
+                logger.info("Trailing stop DISABLED — relying on take-profit only")
 
             self.display.print_trade_executed(
                 signal.signal, avg_price, actual_filled,
@@ -509,23 +512,24 @@ class TradingBot:
             self._close_position("TP")
             return True
 
-        # 2. Update trailing stop
-        old_stop = self.position.trailing_stop_price
-        new_stop = self.strategy.update_trailing_stop(self.position, self.current_price)
+        # 2. Update trailing stop (only if enabled)
+        if self.cfg.strategy.trailing_stop_enabled:
+            old_stop = self.position.trailing_stop_price
+            new_stop = self.strategy.update_trailing_stop(self.position, self.current_price)
 
-        if new_stop != old_stop:
-            # Trailing stop moved - update the stop order
-            if not self._update_stop_order():
-                # Stop order update failed - might mean it was filled
-                # Check if position was closed by stop
-                if self._check_stop_filled():
-                    self._close_position("SL")
-                    return True
+            if new_stop != old_stop:
+                # Trailing stop moved - update the stop order
+                if not self._update_stop_order():
+                    # Stop order update failed - might mean it was filled
+                    # Check if position was closed by stop
+                    if self._check_stop_filled():
+                        self._close_position("SL")
+                        return True
 
-        # 3. Check if stop loss is hit
-        if self.strategy.check_stop_loss(self.position, self.current_price):
-            self._close_position("SL")
-            return True
+            # 3. Check if stop loss is hit
+            if self.strategy.check_stop_loss(self.position, self.current_price):
+                self._close_position("SL")
+                return True
 
         return False
 
@@ -802,6 +806,10 @@ class TradingBot:
                 self.cfg.strategy.short_enabled = value if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes")
                 self.strategy = BollingerBandStrategy(self.cfg.strategy)
                 logger.info(f"[Web] short_enabled = {self.cfg.strategy.short_enabled}")
+            elif key == "trailing_stop_enabled":
+                self.cfg.strategy.trailing_stop_enabled = value if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes")
+                self.strategy = BollingerBandStrategy(self.cfg.strategy)
+                logger.info(f"[Web] trailing_stop_enabled = {self.cfg.strategy.trailing_stop_enabled}")
             elif key == "poll_interval":
                 self.cfg.poll_interval_sec = float(value)
                 logger.info(f"[Web] poll_interval = {value}s")
@@ -932,6 +940,7 @@ class TradingBot:
                 "trail_pct": self.cfg.strategy.trail_pct * 100,
                 "poll_interval": self.cfg.poll_interval_sec,
                 "short_enabled": self.cfg.strategy.short_enabled,
+                "trailing_stop_enabled": self.cfg.strategy.trailing_stop_enabled,
                 "in_session": self._is_in_trading_session(),
                 "session_hours": [
                     f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}"
@@ -974,6 +983,11 @@ class TradingBot:
 
         # 3. TRADING LOGIC — skip if paused
         if not self.paused:
+            # Auto-close position if daily limits are breached
+            if self.position and self.risk_manager.is_locked:
+                self._close_position("LIMIT_BREACH")
+                logger.warning(f"🔒 Position closed: {self.risk_manager.lock_reason}")
+
             # Check exit conditions (always, even outside sessions)
             if self.position:
                 self.check_and_execute_exit()
@@ -1069,7 +1083,9 @@ class TradingBot:
                     f"StdDev: {self.cfg.strategy.bb_stddev} | "
                     f"Near: {self.cfg.strategy.near_threshold*100:.1f}% | "
                     f"Trail: {self.cfg.strategy.trail_pct*100:.1f}%")
+        logger.info(f"Candles Window: {self.cfg.strategy.candles_window}")
         logger.info(f"SHORT Signals: {'ON' if self.cfg.strategy.short_enabled else 'OFF (LONG only)'}")
+        logger.info(f"Trailing Stop: {'ON' if self.cfg.strategy.trailing_stop_enabled else 'OFF (TP-only)'}")
         logger.info(f"Sessions (IST): " + ", ".join(
             f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}" for sh, sm, eh, em in SESSION_HOURS
         ))

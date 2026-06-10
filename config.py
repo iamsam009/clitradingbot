@@ -43,10 +43,13 @@ class StrategyConfig:
     """Enable SHORT entry signals. Set False for LONG-only mode."""
 
     candles_window: int = 50
-    """Number of candles to check for BB analysis."""
+    """Number of candles to fetch and use for BB analysis (passed to fetch_ohlcv)."""
 
     trail_pct: float = 0.005
     """Trailing stop percentage as decimal (0.005 = 0.5%)."""
+
+    trailing_stop_enabled: bool = True
+    """Enable trailing stop orders. When False, only take-profit exits are used."""
 
 
 # ===========================================================================
@@ -157,6 +160,7 @@ class BotConfig:
         config.strategy.short_enabled = os.getenv("SHORT_ENABLED", "true").lower() in ("1", "true", "yes")
         config.strategy.candles_window = int(os.getenv("CANDLES_WINDOW", "50"))
         config.strategy.trail_pct = float(os.getenv("TRAIL_PCT", "0.005"))
+        config.strategy.trailing_stop_enabled = os.getenv("TRAILING_STOP_ENABLED", "true").lower() in ("1", "true", "yes")
 
         config.risk.trade_size_inr = float(os.getenv("TRADE_SIZE_INR", "20000"))
         config.risk.usd_inr_rate = float(os.getenv("USD_INR_RATE", "83.5"))
