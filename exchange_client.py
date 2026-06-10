@@ -247,7 +247,7 @@ class SharkExClient:
                     # Public endpoints – simple request, no auth
                     if method in ("POST", "PUT"):
                         resp = self._session.post(
-                            url, data=json.dumps(params), timeout=15
+                            url, json=params, timeout=15
                         )
                     else:
                         resp = self._session.get(url, params=params, timeout=15)

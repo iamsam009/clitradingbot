@@ -139,8 +139,12 @@ start_bot() {
 
     source "$SCRIPT_DIR/venv/bin/activate"
 
+    # Clear stale Python bytecode cache to ensure code changes take effect
+    find "$SCRIPT_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+
     # Start bot with nohup, redirect output to log file
-    nohup python3 "$SCRIPT_DIR/bot.py" --no-interactive >> "$LOG_FILE" 2>&1 &
+    # PYTHONDONTWRITEBYTECODE=1 prevents future .pyc cache issues
+    nohup env PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/bot.py" --no-interactive >> "$LOG_FILE" 2>&1 &
     BOT_PID=$!
     echo $BOT_PID > "$PID_FILE"
 
@@ -264,7 +268,9 @@ case "${1:-}" in
         stop_bot
         sleep 1
         source "$SCRIPT_DIR/venv/bin/activate"
-        nohup python3 "$SCRIPT_DIR/bot.py" --no-interactive >> "$LOG_FILE" 2>&1 &
+        # Clear stale bytecode cache before restart
+        find "$SCRIPT_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+        nohup env PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/bot.py" --no-interactive >> "$LOG_FILE" 2>&1 &
         echo $! > "$PID_FILE"
         sleep 2
         echo -e "${GREEN}✔ Bot restarted (PID: $(cat $PID_FILE))${NC}"

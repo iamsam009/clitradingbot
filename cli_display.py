@@ -28,7 +28,6 @@ from typing import Optional, List, Dict, Any, Tuple
 
 import pytz
 from rich.console import Console
-from rich.live import Live
 from rich.table import Table
 from rich.panel import Panel
 from rich.layout import Layout
@@ -270,7 +269,6 @@ class CLIDisplay:
     def __init__(self, cfg: BotConfig):
         self.cfg = cfg
         self.console = Console()
-        self._live: Optional[Live] = None
         self._start_time = time.time()
 
         # ── Keyboard / interaction ──
@@ -332,45 +330,46 @@ class CLIDisplay:
     # ─── Display Lifecycle ───────────────────────────────────────────────
 
     def start_live_display(self):
-        """Start the live updating display and keyboard listener."""
+        """Start the live updating display and keyboard listener.
+
+        Uses console.clear() + console.print() instead of Rich Live widget
+        because Live's incremental diffing and ANSI escape sequences are
+        fundamentally unreliable over SSH connections — they cause extreme
+        flickering, stacking, and duplicate dashboard artifacts.
+
+        This approach sends a full clear-screen escape sequence followed by
+        one atomic renderable, guaranteeing zero flicker on any terminal.
+        """
         self._keyboard.start()
-        self._live = Live(
-            self._generate_layout(),
-            console=self.console,
-            refresh_per_second=4,       # Smooth but not excessive
-            screen=True,                # Clear screen before each render via escape sequences
-            auto_refresh=False,         # Manual refresh — only when data changes (no flicker)
-            transient=False,
-        )
-        self._live.start()
+        # Render the initial dashboard frame
+        self.console.clear()
+        self.console.print(self._generate_layout())
 
     def stop_live_display(self):
         """Stop the live display and keyboard listener."""
         self._keyboard.stop()
-        if self._live:
-            self._live.stop()
 
     def refresh(self):
-        """Refresh the live display and process keyboard input."""
-        if self._live:
-            # Process any pending keystrokes
-            self._process_keystrokes()
+        """Refresh the display — clear screen and reprint full dashboard.
 
-            # Always update — Rich diffs internally to minimize redraw
-            self._live.update(self._generate_layout(), refresh=True)
+        Unlike Rich Live (which diffs incrementally), this does a full
+        repaint.  A full terminal frame is ~4 KB which is negligible
+        even over slow SSH connections at 2-4 fps.
+        """
+        # Process any pending keystrokes
+        self._process_keystrokes()
+
+        # Clear screen (ANSI \033[2J\033[H) then print atomically
+        self.console.clear()
+        self.console.print(self._generate_layout())
 
     def tick(self):
         """Lightweight tick: only process keystrokes, no render."""
         self._process_keystrokes()
 
     def shutdown(self):
-        """Full cleanup - restore terminal, stop display."""
+        """Full cleanup - restore terminal, stop keyboard listener."""
         self._keyboard.stop()
-        if self._live:
-            try:
-                self._live.stop()
-            except Exception:
-                pass
 
     # ─── Keyboard / Interaction Handling ─────────────────────────────────
 
