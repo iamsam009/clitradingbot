@@ -338,8 +338,8 @@ class CLIDisplay:
             self._generate_layout(),
             console=self.console,
             refresh_per_second=4,       # Smooth but not excessive
-            screen=False,               # False = no screen clear, critical for SSH
-            auto_refresh=False,         # Manual refresh — only when data changes
+            screen=True,                # Clear screen before each render via escape sequences
+            auto_refresh=False,         # Manual refresh — only when data changes (no flicker)
             transient=False,
         )
         self._live.start()

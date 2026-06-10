@@ -350,7 +350,7 @@ class SharkExClient:
         Returns list of dicts with keys: timestamp, open, high, low, close, volume.
         """
         body: Dict[str, Any] = {
-            "symbol": self._market_symbol,
+            "pair": self._market_symbol,
             "interval": timeframe,
             "limit": limit,
         }
