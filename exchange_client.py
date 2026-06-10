@@ -252,8 +252,9 @@ class SharkExClient:
                     else:
                         resp = self._session.get(url, params=params, timeout=15)
                 elif method == "GET":
-                    _, headers = self._sign_get(params)
-                    resp = self._session.get(url, params=params, headers=headers, timeout=15)
+                    query_string, headers = self._sign_get(params)
+                    full_url = f"{url}?{query_string}"
+                    resp = self._session.get(full_url, headers=headers, timeout=15)
                 elif method in ("POST", "PUT", "DELETE"):
                     body, headers = self._sign_body(params)
                     resp = self._session.request(
