@@ -195,6 +195,8 @@ def start_server(host: str = "0.0.0.0", port: int = 8080) -> bool:
 
     try:
         _server = HTTPServer((host, port), DashboardHandler)
+        # Allow address reuse so restarting the bot doesn't fail on TIME_WAIT
+        _server.socket.setsockopt(__import__("socket").SOL_SOCKET, __import__("socket").SO_REUSEADDR, 1)
     except OSError as e:
         logger.error(f"Failed to bind {host}:{port} — {e}")
         return False

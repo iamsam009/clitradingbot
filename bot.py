@@ -924,7 +924,7 @@ class TradingBot:
 
             web_api.update_state(state)
         except Exception:
-            pass
+            logger.debug(f"Web state push failed: {traceback.format_exc()}")
 
     # ─── MAIN CYCLE ───
 
@@ -947,6 +947,7 @@ class TradingBot:
                 last_error=self.last_error,
                 bot_status="PAUSED (Data)" if self.paused else "ERROR (Data)",
             )
+            self._push_web_state()  # Still push state so dashboard shows status
             return
 
         # 3. TRADING LOGIC — skip if paused
@@ -979,43 +980,49 @@ class TradingBot:
 
     def _update_display(self):
         """Prepare data and push to the CLI display."""
-        balances = self.fetch_balances()
+        # Always push web state FIRST (has its own error handling)
+        try:
+            self._push_web_state()
+        except Exception:
+            logger.debug(f"Web state push failed in _update_display: {traceback.format_exc()}")
 
-        # Flatten nested balances for the display table.
-        display_balances: Dict[str, float] = {}
-        for asset, val in balances.items():
-            if isinstance(val, dict):
-                display_balances[asset] = float(val.get("free", 0))
-            elif isinstance(val, (int, float)):
-                display_balances[asset] = float(val)
+        try:
+            balances = self.fetch_balances()
 
-        # Get recent trades
-        recent_trades = self.risk_manager.get_recent_trades(20)
+            # Flatten nested balances for the display table.
+            display_balances: Dict[str, float] = {}
+            for asset, val in balances.items():
+                if isinstance(val, dict):
+                    display_balances[asset] = float(val.get("free", 0))
+                elif isinstance(val, (int, float)):
+                    display_balances[asset] = float(val)
 
-        # Get latest signal info
-        signal = self.strategy.detect_entry_signal()
+            # Get recent trades
+            recent_trades = self.risk_manager.get_recent_trades(20)
 
-        self.display.update_data(
-            current_price=self.current_price,
-            balance=display_balances,
-            position=self.position,
-            bb_result=self.current_bb,
-            signal=signal.signal,
-            signal_reason=signal.reason,
-            last_signal_distance=0.0,
-            nearest_trade_direction="",
-            nearest_trade_distance_pct=0.0,
-            nearest_trade_trigger_price=0.0,
-            bot_status="RUNNING" if self.running else "STOPPING",
-            cycle_count=self.cycle_count,
-            last_error=self.last_error,
-            paper_trading=False,
-            risk_manager=self.risk_manager,
-            recent_trades=recent_trades,
-        )
+            # Get latest signal info
+            signal = self.strategy.detect_entry_signal()
 
-        # Also push state to web dashboard
-        self._push_web_state()
+            self.display.update_data(
+                current_price=self.current_price,
+                balance=display_balances,
+                position=self.position,
+                bb_result=self.current_bb,
+                signal=signal.signal,
+                signal_reason=signal.reason,
+                last_signal_distance=0.0,
+                nearest_trade_direction="",
+                nearest_trade_distance_pct=0.0,
+                nearest_trade_trigger_price=0.0,
+                bot_status="RUNNING" if self.running else "STOPPING",
+                cycle_count=self.cycle_count,
+                last_error=self.last_error,
+                paper_trading=False,
+                risk_manager=self.risk_manager,
+                recent_trades=recent_trades,
+            )
+        except Exception:
+            logger.debug(f"Display update failed: {traceback.format_exc()}")
 
     # ─── RUN LOOP ───
 
