@@ -126,14 +126,37 @@ class TradingBot:
     # ─── BALANCE FETCHING ───
 
     def fetch_balances(self) -> Dict[str, Any]:
-        """Fetch account balances."""
+        """Fetch account balances.
+
+        When the SharkEx wallet returns INR-denominated balances (the account
+        is INR-margined), this method converts INR → USDT using the configured
+        ``USD_INR_RATE`` so that downstream code always works with USDT values.
+        The original INR values are preserved under the ``"INR"`` key for the
+        display.
+        """
         try:
             if self.cfg.paper_trading:
                 return {
                     "USDT": {"free": self.paper_balance["USDT"], "total": self.paper_balance["USDT"]},
                     "BTC": {"free": self.paper_balance["BTC"], "total": self.paper_balance["BTC"]},
                 }
-            return self.exchange.fetch_balance()
+            raw = self.exchange.fetch_balance()
+
+            # If the exchange returned an INR balance (INR-margined account),
+            # compute the USDT equivalent and inject it under "USDT" so that
+            # execute_entry() etc. can check ``balances.get("USDT")``.
+            inr_info = raw.get("INR", {})
+            inr_balance = inr_info.get("free", 0) if isinstance(inr_info, dict) else float(inr_info)
+            if inr_balance > 0 and "USDT" not in raw:
+                rate = self.cfg.risk.usd_inr_rate
+                if rate > 0:
+                    total_raw = float(raw.get("INR", {}).get("total", 0) if isinstance(raw.get("INR"), dict) else 0)
+                    raw["USDT"] = {
+                        "free": inr_balance / rate,
+                        "total": total_raw / rate,
+                    }
+
+            return raw
         except Exception as e:
             logger.error(f"Balance fetch error: {e}")
             return {}

@@ -421,23 +421,22 @@ class SharkExClient:
         GET /v1/wallet/futures-wallet/details  (authenticated)
 
         SharkEx returns a flat wallet-level object whose keys depend on the
-        margin asset.  Examples:
+        account's margin asset.  For INR-margined accounts:
 
-          marginAsset=INR  → {"inrBalance":"1941.50", "walletBalance":"1941.50", ...}
-          marginAsset=USDT → {"usdtBalance":"123.45", "walletBalance":"123.45", ...}
+          {"inrBalance":"1941.50", "walletBalance":"1941.50",
+           "marginBalance":"1468.52", "lockedBalance":"473.00", ...}
 
-        We pass ``marginAsset=USDT`` so the API returns USDT-denominated
-        balances.  Only per-asset ``*Balance`` keys are extracted (e.g.
-        ``usdtBalance``, ``btcBalance``); utility keys like
-        ``walletBalance``, ``marginBalance``, ``lockedBalance`` etc. are
-        ignored.
+        We extract *inrBalance* as the available free margin and
+        *walletBalance* as the total wallet value.  The caller is responsible
+        for converting INR → USDT if needed (e.g. via USD_INR_RATE).
 
-        Returns dict like {"USDT": {"free": 123.45, "total": 123.45}, ...}
+        Returns dict like {"INR": {"free": 1941.50, "total": 1941.50}, ...}
+        (or ``{"USDT": {…}}`` for USDT-margined accounts).  Numeric values are
+        always in the account's native margin currency.
         """
         resp = self._request(
             "GET",
             "/v1/wallet/futures-wallet/details",
-            params={"marginAsset": "USDT"},
             authenticated=True,
         )
 
@@ -458,19 +457,22 @@ class SharkExClient:
             "usdtBalance", "inrBalance", "btcBalance", "ethBalance",
         })
 
-        usdt_free = float(wallet.get("usdtBalance") or 0)
         total = float(wallet.get("walletBalance", 0))
 
         balances: Dict[str, Dict[str, float]] = {}
-        balances["USDT"] = {"free": usdt_free, "total": total}
 
-        # Expose any other scalar per-asset balances the response carries.
+        # Extract each genuine per-asset balance the response carries.
+        # For an INR-margined account this gives {"INR": {"free": 1941.50, ...}}.
+        # For a USDT-margined account this gives {"USDT": {"free": 123.45, ...}}.
         for key, val in wallet.items():
             if key in ASSET_KEYS and isinstance(val, (int, float, str)):
-                # "usdtBalance" → "USDT", "btcBalance" → "BTC"
-                asset = key[:-7].upper()
-                if asset not in balances:
-                    balances[asset] = {"free": float(val), "total": float(val)}
+                asset = key[:-7].upper()  # "inrBalance" → "INR", "usdtBalance" → "USDT"
+                balances[asset] = {"free": float(val), "total": total}
+
+        # If no per-asset balance was found, return a zero USDT fallback so
+        # callers don't crash on a missing key.
+        if not balances:
+            balances["USDT"] = {"free": 0, "total": total}
 
         return balances
 
