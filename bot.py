@@ -735,10 +735,14 @@ class TradingBot:
                     "exit_time": t.exit_time,
                 })
 
+            all_trades_today = self.risk_manager.get_recent_trades(100)
+            winning = sum(1 for t in all_trades_today if t.pnl_usdt > 0)
+            total_t = self.risk_manager.trades_today
             daily = {
                 "date": self.risk_manager._current_date if hasattr(self.risk_manager, "_current_date") else datetime.now(IST).strftime("%Y-%m-%d"),
-                "total_trades": self.risk_manager.trades_today,
-                "winning_trades": sum(1 for t in self.risk_manager.get_recent_trades(100) if t.pnl_usdt > 0),
+                "total_trades": total_t,
+                "winning_trades": winning,
+                "losing_trades": total_t - winning,
                 "total_pnl_usdt": self.risk_manager.daily_pnl_usdt,
                 "total_pnl_inr": self.risk_manager.daily_pnl_inr,
                 "is_locked": self.risk_manager._is_locked if hasattr(self.risk_manager, "_is_locked") else False,
@@ -767,6 +771,7 @@ class TradingBot:
                 "signal_reason": signal.reason,
                 "signal_distance": signal.near_distance_pct,
                 "nearest_trade_direction": nearest["direction"],
+                "nearest_trade_band": "UPPER" if nearest["direction"] == "SHORT" else ("LOWER" if nearest["direction"] == "LONG" else ""),
                 "nearest_trade_distance_pct": nearest["distance_pct"],
                 "nearest_trade_trigger_price": nearest["trigger_price"],
                 "bb_period": self.cfg.strategy.bb_period,
