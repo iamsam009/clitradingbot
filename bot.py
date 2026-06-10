@@ -755,6 +755,13 @@ def main():
     )
     args = parser.parse_args()
 
+    # Load .env file into os.environ before reading config
+    # (python-dotenv is in requirements.txt but never called anywhere)
+    from dotenv import load_dotenv
+    env_path = args.config or os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.isfile(env_path):
+        load_dotenv(env_path)
+
     # Load configuration
     if args.no_interactive:
         cfg = BotConfig.from_env()
