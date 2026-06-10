@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🦈 SharkEx Trading Bot — Live Dashboard</title>
+<style>
+/* ============================================================
+   DARK PROFESSIONAL THEME — SharkEx Trading Dashboard
+   ============================================================ */
+:root {
+  --bg: #0b0e11;
+  --bg-panel: #161a1e;
+  --bg-card: #1e2329;
+  --border: #2b3139;
+  --text: #eaecef;
+  --text-dim: #848e9c;
+  --text-muted: #5e6673;
+  --green: #0ecb81;
+  --green-bg: rgba(14,203,129,0.10);
+  --red: #f6465d;
+  --red-bg: rgba(246,70,93,0.10);
+  --blue: #3b82f6;
+  --blue-bg: rgba(59,130,246,0.10);
+  --yellow: #f0b90b;
+  --yellow-bg: rgba(240,185,11,0.10);
+  --radius: 8px;
+  --font: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── Header Bar ── */
+.header {
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 24px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.header .logo {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+}
+.header .logo span { color: var(--yellow); }
+.header .badge {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 100px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.badge-live { background: var(--green-bg); color: var(--green); }
+.badge-paused { background: var(--yellow-bg); color: var(--yellow); }
+.badge-paper { background: var(--blue-bg); color: var(--blue); }
+.badge-locked { background: var(--red-bg); color: var(--red); }
+
+.header .price-ticker {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 700;
+  margin-left: auto;
+}
+.price-up { color: var(--green); }
+.price-down { color: var(--red); }
+.price-flat { color: var(--text); }
+
+.header .price-change {
+  font-family: var(--mono);
+  font-size: 13px;
+  margin-left: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+/* ── Main Grid ── */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 12px;
+  padding: 12px 16px;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+/* ── Cards ── */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.card-header {
+  background: var(--bg-panel);
+  padding: 10px 16px;
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-header .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.dot-green { background: var(--green); }
+.dot-red { background: var(--red); }
+.dot-blue { background: var(--blue); }
+.dot-yellow { background: var(--yellow); }
+
+.card-body { padding: 14px 16px; }
+
+/* ── Info Rows ── */
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+.info-row:last-child { border-bottom: none; }
+.info-label { color: var(--text-dim); font-size: 12px; }
+.info-value { font-family: var(--mono); font-weight: 600; font-size: 13px; }
+.val-green { color: var(--green); }
+.val-red { color: var(--red); }
+.val-blue { color: var(--blue); }
+.val-yellow { color: var(--yellow); }
+
+/* ── BB Band Bar ── */
+.bb-bar {
+  position: relative;
+  height: 28px;
+  background: var(--bg);
+  border-radius: 4px;
+  margin: 10px 0;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.bb-bar .band-fill {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: rgba(59,130,246,0.08);
+  border-left: 1px dashed rgba(59,130,246,0.3);
+  border-right: 1px dashed rgba(59,130,246,0.3);
+}
+.bb-bar .price-marker {
+  position: absolute;
+  top: -4px;
+  width: 3px;
+  height: 36px;
+  background: var(--text);
+  border-radius: 2px;
+  z-index: 2;
+}
+.bb-bar .band-label {
+  position: absolute;
+  top: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  transform: translateX(-50%);
+}
+.bb-bar .sma-line {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: var(--text-muted);
+}
+
+/* ── Trades Table ── */
+.trades-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.trades-table th {
+  text-align: left;
+  padding: 8px 10px;
+  color: var(--text-dim);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border);
+}
+.trades-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.02);
+  white-space: nowrap;
+}
+
+/* ── Settings Form ── */
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.settings-grid label {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.settings-grid .input-group {
+  display: flex;
+  gap: 4px;
+}
+.settings-grid input, .settings-grid select {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.settings-grid input:focus, .settings-grid select:focus {
+  border-color: var(--blue);
+}
+.settings-grid button {
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+.settings-grid button:hover { background: #2563eb; }
+.settings-grid button.saved {
+  background: var(--green);
+  transition: background 0.3s;
+}
+
+/* ── Log Feed ── */
+.log-feed {
+  max-height: 220px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.log-feed::-webkit-scrollbar { width: 5px; }
+.log-feed::-webkit-scrollbar-track { background: var(--bg); }
+.log-feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.log-entry {
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.02);
+  display: flex;
+  gap: 8px;
+}
+.log-time { color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
+.log-msg { word-break: break-all; }
+.log-error { color: var(--red); }
+.log-success { color: var(--green); }
+.log-signal-long { color: var(--green); font-weight: 600; }
+.log-signal-short { color: var(--red); font-weight: 600; }
+
+/* ── Nearest Trade Prediction ── */
+.prediction-box {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  text-align: center;
+}
+.prediction-box .pred-direction {
+  font-size: 28px;
+  font-weight: 800;
+  margin-bottom: 4px;
+}
+.prediction-box .pred-detail {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ── Progress Bar ── */
+.progress-bar {
+  height: 4px;
+  background: var(--bg);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+.progress-bar .fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.5s ease;
+}
+.fill-green { background: var(--green); }
+.fill-red { background: var(--red); }
+.fill-yellow { background: var(--yellow); }
+
+/* ── Full-width cards ── */
+.full-width { grid-column: 1 / -1; }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .grid { grid-template-columns: 1fr; padding: 8px; }
+  .header { padding: 8px 12px; }
+  .header .price-ticker { font-size: 18px; }
+  .settings-grid { grid-template-columns: 1fr; }
+}
+
+/* ── Pulse animation for live dot ── */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.pulse { animation: pulse 2s ease-in-out infinite; }
+
+/* ── Flash update indicator ── */
+.flash { transition: background 0.3s; }
+.flash-updated { background: rgba(59,130,246,0.05); }
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<!-- ============================================================
+     HEADER
+     ============================================================ -->
+<div class="header" id="header">
+  <div class="logo">🦈 SharkEx <span>Bot</span></div>
+  <span class="badge badge-live pulse" id="statusBadge">● LIVE</span>
+  <span class="badge badge-paper" id="paperBadge" style="display:none">📄 PAPER</span>
+  <span class="badge badge-locked" id="lockBadge" style="display:none">🔒 LOCKED</span>
+  <span style="color:var(--text-dim);font-size:12px" id="pairLabel">BTC/USDT</span>
+  <span style="color:var(--text-dim);font-size:11px" id="leverageLabel">10x</span>
+  <span class="price-ticker" id="priceTicker">--</span>
+  <span class="price-change" id="priceChange">--</span>
+  <span style="color:var(--text-dim);font-size:11px;margin-left:auto" id="cycleCount">Cycle: 0</span>
+  <span style="color:var(--text-dim);font-size:11px" id="clockLabel">--</span>
+</div>
+
+<!-- ============================================================
+     MAIN GRID
+     ============================================================ -->
+<div class="grid">
+
+  <!-- PRICE & BALANCE -->
+  <div class="card">
+    <div class="card-header"><span class="dot dot-blue pulse"></span> Price & Balance</div>
+    <div class="card-body" id="priceBalanceBody">
+      <div class="info-row"><span class="info-label">Last Price</span><span class="info-value" id="lastPrice">--</span></div>
+      <div class="info-row"><span class="info-label">24h High</span><span class="info-value val-green" id="high24h">--</span></div>
+      <div class="info-row"><span class="info-label">24h Low</span><span class="info-value val-red" id="low24h">--</span></div>
+      <div class="info-row"><span class="info-label">24h Volume</span><span class="info-value" id="vol24h">--</span></div>
+      <div style="border-top:1px solid var(--border);margin:8px 0"></div>
+      <div class="info-row"><span class="info-label">USDT Balance</span><span class="info-value val-blue" id="usdtBal">--</span></div>
+      <div class="info-row"><span class="info-label">INR Value</span><span class="info-value val-yellow" id="inrVal">--</span></div>
+      <div class="info-row"><span class="info-label">Trade Size</span><span class="info-value" id="tradeSize">--</span></div>
+      <div class="info-row"><span class="info-label">Max Daily Loss</span><span class="info-value val-red" id="maxDailyLoss">--</span></div>
+      <div class="info-row"><span class="info-label">USD/INR Rate</span><span class="info-value" id="usdInrRate">--</span></div>
+    </div>
+  </div>
+
+  <!-- POSITION -->
+  <div class="card" id="positionCard">
+    <div class="card-header"><span class="dot dot-yellow"></span> Open Position</div>
+    <div class="card-body" id="positionBody">
+      <div style="color:var(--text-muted);text-align:center;padding:20px">No open position</div>
+    </div>
+  </div>
+
+  <!-- BOLLINGER BANDS -->
+  <div class="card">
+    <div class="card-header"><span class="dot dot-blue"></span> Bollinger Bands</div>
+    <div class="card-body" id="bbBody">
+      <div class="info-row"><span class="info-label">Upper Band</span><span class="info-value val-red" id="bbUpper">--</span></div>
+      <div class="info-row"><span class="info-label">Middle (SMA)</span><span class="info-value" id="bbSma">--</span></div>
+      <div class="info-row"><span class="info-label">Lower Band</span><span class="info-value val-green" id="bbLower">--</span></div>
+      <div class="info-row"><span class="info-label">Band Width</span><span class="info-value" id="bbWidth">--</span></div>
+      <div class="info-row"><span class="info-label">Volatility (σ)</span><span class="info-value" id="bbVol">--</span></div>
+      <div class="bb-bar" id="bbBarContainer">
+        <div class="band-fill" id="bbBandFill" style="left:0;right:0"></div>
+        <div class="sma-line" id="bbSmaLine" style="left:50%"></div>
+        <div class="price-marker" id="bbPriceMarker" style="left:50%"></div>
+        <div class="band-label" id="bbLabelLower" style="left:0">--</div>
+        <div class="band-label" id="bbLabelUpper" style="left:100%">--</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SIGNAL & NEAREST TRADE -->
+  <div class="card">
+    <div class="card-header"><span class="dot dot-yellow pulse"></span> Signal & Nearest Trade</div>
+    <div class="card-body" id="signalBody">
+      <div class="info-row"><span class="info-label">Current Signal</span><span class="info-value" id="signalVal">NONE</span></div>
+      <div class="info-row"><span class="info-label">Signal Reason</span><span class="info-value" id="signalReason" style="font-size:11px">--</span></div>
+      <div class="info-row"><span class="info-label">Signal Distance</span><span class="info-value" id="signalDist">--</span></div>
+      <div style="border-top:1px solid var(--border);margin:10px 0"></div>
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">⏱️ Nearest Trade Prediction</div>
+      <div class="prediction-box" id="predictionBox">
+        <div class="pred-direction" style="color:var(--text-muted)">--</div>
+        <div class="pred-detail">Waiting for data...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- STRATEGY CONFIG -->
+  <div class="card">
+    <div class="card-header"><span class="dot dot-blue"></span> Strategy Parameters</div>
+    <div class="card-body">
+      <div class="info-row"><span class="info-label">BB Period</span><span class="info-value" id="cfgBBPeriod">20</span></div>
+      <div class="info-row"><span class="info-label">BB StdDev</span><span class="info-value" id="cfgBBStdDev">2.0</span></div>
+      <div class="info-row"><span class="info-label">Candle Timeframe</span><span class="info-value" id="cfgCandleTF">5m</span></div>
+      <div class="info-row"><span class="info-label">Near Threshold</span><span class="info-value" id="cfgNearThresh">0.50%</span></div>
+      <div class="info-row"><span class="info-label">Trail Stop %</span><span class="info-value" id="cfgTrailPct">0.50%</span></div>
+      <div class="info-row"><span class="info-label">Poll Interval</span><span class="info-value" id="cfgPollInt">5.0s</span></div>
+    </div>
+  </div>
+
+  <!-- PnL / DAILY STATS -->
+  <div class="card">
+    <div class="card-header"><span class="dot dot-green"></span> Daily P&L & Stats</div>
+    <div class="card-body">
+      <div class="info-row"><span class="info-label">Trades Today</span><span class="info-value" id="pnlTradesToday">0</span></div>
+      <div class="info-row"><span class="info-label">Win / Loss</span><span class="info-value" id="pnlWinLoss">0 / 0</span></div>
+      <div class="info-row"><span class="info-label">Daily P&L (USDT)</span><span class="info-value" id="pnlDailyUsdt">$0.00</span></div>
+      <div class="info-row"><span class="info-label">Daily P&L (INR)</span><span class="info-value" id="pnlDailyInr">₹0.00</span></div>
+      <div style="border-top:1px solid var(--border);margin:8px 0"></div>
+      <div class="info-row"><span class="info-label">Max Trades</span><span class="info-value" id="pnlMaxTrades">10/day</span></div>
+      <div class="info-row"><span class="info-label">Trade Limit</span><span class="info-value" id="pnlTradeLimit">--</span></div>
+    </div>
+  </div>
+
+  <!-- RECENT TRADES (full width) -->
+  <div class="card full-width">
+    <div class="card-header"><span class="dot dot-green"></span> Recent Trades</div>
+    <div class="card-body" style="overflow-x:auto">
+      <table class="trades-table">
+        <thead>
+          <tr>
+            <th>#</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th>
+            <th>P&L (USDT)</th><th>P&L (INR)</th><th>Reason</th><th>Time</th>
+          </tr>
+        </thead>
+        <tbody id="tradesTbody">
+          <tr><td colspan="9" style="color:var(--text-muted);text-align:center;padding:16px">No trades yet today</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- SETTINGS (full width) -->
+  <div class="card full-width">
+    <div class="card-header"><span class="dot dot-yellow"></span> ⚙️ Bot Settings</div>
+    <div class="card-body">
+      <div class="settings-grid">
+        <div>
+          <label>Trade Size (INR)</label>
+          <div class="input-group">
+            <input type="number" id="setTradeSize" placeholder="20000" step="1000">
+            <button onclick="saveSetting('trade_size_inr', 'setTradeSize')">Save</button>
+          </div>
+        </div>
+        <div>
+          <label>Leverage</label>
+          <div class="input-group">
+            <input type="number" id="setLeverage" placeholder="10" min="1" max="100">
+            <button onclick="saveSetting('leverage', 'setLeverage')">Save</button>
+          </div>
+        </div>
+        <div>
+          <label>Trading Pair</label>
+          <div class="input-group">
+            <select id="setSymbol">
+              <option value="BTC/USDT">BTC/USDT</option>
+              <option value="BTC/INR">BTC/INR</option>
+              <option value="ETH/USDT">ETH/USDT</option>
+            </select>
+            <button onclick="saveSetting('symbol', 'setSymbol')">Save</button>
+          </div>
+        </div>
+        <div>
+          <label>Contract Name</label>
+          <div class="input-group">
+            <input type="text" id="setContract" placeholder="BTCINR">
+            <button onclick="saveSetting('contract_name', 'setContract')">Save</button>
+          </div>
+        </div>
+        <div>
+          <label>BB Period</label>
+          <div class="input-group">
+            <input type="number" id="setBBPeriod" placeholder="20" min="5" max="100">
+            <button onclick="saveSetting('bb_period', 'setBBPeriod')">Save</button>
+          </div>
+        </div>
+        <div>
+          <label>BB StdDev</label>
+          <div class="input-group">
+            <input type="number" id="setBBStdDev" placeholder="2.0" step="0.1" min="1" max="5">
+            <button onclick="saveSetting('bb_stddev', 'setBBStdDev')">Save</button>
+          </div>
+        </div>
+        <div>
+          <label>Near Threshold (%)</label>
+          <div class="input-group">
+            <input type="number" id="setNearThreshold" placeholder="0.5" step="0.1" min="0.1" max="10">
+            <button onclick="saveSetting('near_threshold', 'setNearThreshold')">Save</button>
+          </div>
+        </div>
+        <div>
+          <label>Trail Stop (%)</label>
+          <div class="input-group">
+            <input type="number" id="setTrailPct" placeholder="0.5" step="0.1" min="0.1" max="5">
+            <button onclick="saveSetting('trail_pct', 'setTrailPct')">Save</button>
+          </div>
+        </div>
+        <div>
+          <label>Poll Interval (sec)</label>
+          <div class="input-group">
+            <input type="number" id="setPollInterval" placeholder="5" step="1" min="1" max="60">
+            <button onclick="saveSetting('poll_interval', 'setPollInterval')">Save</button>
+          </div>
+        </div>
+        <div>
+          <label>Pause / Resume</label>
+          <button onclick="saveSetting('toggle_pause', null)" style="width:100%;padding:10px">⏯️ Toggle Pause</button>
+        </div>
+      </div>
+      <div id="settingsFeedback" style="margin-top:10px;font-size:12px;color:var(--green);display:none"></div>
+    </div>
+  </div>
+
+  <!-- LOG FEED (full width) -->
+  <div class="card full-width">
+    <div class="card-header"><span class="dot dot-blue"></span> 📋 Live Log</div>
+    <div class="card-body">
+      <div class="log-feed" id="logFeed">
+        <div class="log-entry"><span class="log-time">--:--:--</span><span class="log-msg">Waiting for bot data...</span></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ============================================================
+//  DASHBOARD LOGIC
+// ============================================================
+const API = '/api/status';
+const CONFIG_API = '/api/config';
+const POLL_MS = 2000; // poll every 2 seconds
+let prevPrice = 0;
+let prevCycle = 0;
+let logLines = [];
+
+function $(id) { return document.getElementById(id); }
+
+// ── Formatting helpers ──
+function fmtUSD(v, dec) {
+  if (dec === undefined) dec = 2;
+  if (v == null || isNaN(v)) return '--';
+  return '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits:dec,maximumFractionDigits:dec});
+}
+function fmtINR(v) {
+  if (v == null || isNaN(v)) return '--';
+  return '₹' + Number(v).toLocaleString('en-IN', {minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function fmtNum(v, dec) {
+  if (dec === undefined) dec = 2;
+  if (v == null || isNaN(v)) return '--';
+  return Number(v).toLocaleString('en-US', {minimumFractionDigits:dec,maximumFractionDigits:dec});
+}
+function fmtPct(v) {
+  if (v == null || isNaN(v)) return '--';
+  return Number(v).toFixed(2) + '%';
+}
+function fmtVol(v) {
+  if (v == null || isNaN(v)) return '--';
+  if (v >= 1e9) return (v/1e9).toFixed(2) + 'B';
+  if (v >= 1e6) return (v/1e6).toFixed(2) + 'M';
+  return Number(v).toLocaleString();
+}
+function fmtTime(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts * 1000);
+  // IST offset
+  const options = {timeZone:'Asia/Kolkata', hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'};
+  return d.toLocaleString('en-IN', options);
+}
+function fmtTimeShort(ts) {
+  if (!ts) return '--:--:--';
+  const d = new Date(ts * 1000);
+  return d.toLocaleString('en-IN', {timeZone:'Asia/Kolkata', hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+
+// ── Add log line ──
+function addLog(time, msg, cls) {
+  logLines.unshift({time:time, msg:msg, cls:cls||''});
+  if (logLines.length > 100) logLines.length = 100;
+  renderLogs();
+}
+
+function renderLogs() {
+  const feed = $('logFeed');
+  feed.innerHTML = logLines.map(l =>
+    `<div class="log-entry"><span class="log-time">${l.time}</span><span class="log-msg ${l.cls}">${l.msg}</span></div>`
+  ).join('') || '<div class="log-entry"><span class="log-time">--:--:--</span><span class="log-msg">Waiting...</span></div>';
+}
+
+// ── Update price with direction flash ──
+function setPriceEl(el, price) {
+  if (prevPrice > 0 && price > prevPrice) el.className = 'price-ticker price-up flash flash-updated';
+  else if (prevPrice > 0 && price < prevPrice) el.className = 'price-ticker price-down flash flash-updated';
+  else el.className = 'price-ticker price-flat';
+  el.textContent = fmtUSD(price);
+  prevPrice = price;
+  setTimeout(() => el.classList.remove('flash-updated'), 600);
+}
+
+// ── BB Bar visualization ──
+function updateBBBar(upper, lower, sma, price) {
+  if (!upper || !lower || !price || upper <= lower) return;
+  const range = upper - lower;
+  const pctPrice = ((price - lower) / range) * 100;
+  const pctSma = ((sma - lower) / range) * 100;
+
+  $('bbBandFill').style.left = '0%';
+  $('bbBandFill').style.right = '0%';
+  $('bbSmaLine').style.left = pctSma.toFixed(1) + '%';
+  $('bbPriceMarker').style.left = Math.max(2, Math.min(98, pctPrice)).toFixed(1) + '%';
+  $('bbPriceMarker').style.background = price > sma ? 'var(--red)' : 'var(--green)';
+  $('bbLabelLower').textContent = fmtUSD(lower);
+  $('bbLabelLower').style.left = '2px';
+  $('bbLabelUpper').textContent = fmtUSD(upper);
+  $('bbLabelUpper').style.left = (pctPrice > 90 ? 'auto' : '100%');
+  $('bbLabelUpper').style.right = (pctPrice > 90 ? '2px' : 'auto');
+}
+
+// ── Update nearest trade prediction ──
+function updatePrediction(data) {
+  const box = $('predictionBox');
+  const dir = data.nearest_trade_direction || '';
+  const band = data.nearest_trade_band || '';
+  const triggerPrice = data.nearest_trigger_price;
+  const distance = data.nearest_trade_distance_pct;
+
+  if (!dir || !band) {
+    box.innerHTML = '<div class="pred-direction" style="color:var(--text-muted)">--</div><div class="pred-detail">No prediction available</div>';
+    return;
+  }
+
+  const isLong = dir === 'LONG';
+  const dirColor = isLong ? 'var(--green)' : 'var(--red)';
+  const emoji = isLong ? '🟢' : '🔴';
+  const directionLabel = isLong ? 'LONG' : 'SHORT';
+
+  box.innerHTML = `
+    <div class="pred-direction" style="color:${dirColor}">${emoji} ${directionLabel}</div>
+    <div class="pred-detail">
+      Nearest band: <strong>${band}</strong> &nbsp;|&nbsp;
+      Trigger: <strong>${fmtUSD(triggerPrice)}</strong> &nbsp;|&nbsp;
+      Distance: <strong>${fmtPct(distance)}</strong>
+    </div>
+  `;
+}
+
+// ── MAIN POLL ──
+let lastTradeCount = 0;
+let lastLogHash = '';
+
+async function poll() {
+  try {
+    const resp = await fetch(API);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const d = await resp.json();
+    if (!d || !d.current_price) { setTimeout(poll, POLL_MS); return; }
+
+    // ── Header ──
+    setPriceEl($('priceTicker'), d.current_price);
+    const chg = d.price_change_pct;
+    const chgEl = $('priceChange');
+    if (chg != null) {
+      chgEl.textContent = (chg >= 0 ? '+' : '') + fmtPct(chg);
+      chgEl.className = 'price-change ' + (chg >= 0 ? 'val-green' : 'val-red');
+      chgEl.style.background = chg >= 0 ? 'var(--green-bg)' : 'var(--red-bg)';
+    }
+    $('pairLabel').textContent = d.symbol || 'BTC/USDT';
+    $('leverageLabel').textContent = (d.leverage || 10) + 'x';
+    $('cycleCount').textContent = 'Cycle: ' + (d.cycle_count || 0);
+    const now = new Date();
+    $('clockLabel').textContent = now.toLocaleString('en-IN', {timeZone:'Asia/Kolkata', hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+
+    // Status badges
+    const statusB = $('statusBadge');
+    const paperB = $('paperBadge');
+    const lockB = $('lockBadge');
+    if (d.paused) {
+      statusB.textContent = '⏸️ PAUSED'; statusB.className = 'badge badge-paused';
+    } else if (d.daily_locked) {
+      statusB.textContent = '🔒 LOCKED'; statusB.className = 'badge badge-locked';
+      lockB.style.display = 'inline-block';
+    } else {
+      statusB.textContent = '● LIVE'; statusB.className = 'badge badge-live pulse';
+      lockB.style.display = 'none';
+    }
+    paperB.style.display = d.paper_trading ? 'inline-block' : 'none';
+
+    // ── Price & Balance ──
+    $('lastPrice').textContent = fmtUSD(d.current_price);
+    $('high24h').textContent = fmtUSD(d.high_24h);
+    $('low24h').textContent = fmtUSD(d.low_24h);
+    $('vol24h').textContent = fmtVol(d.volume_24h);
+    $('usdtBal').textContent = fmtUSD(d.usdt_balance);
+    $('inrVal').textContent = fmtINR(d.inr_value);
+    $('tradeSize').textContent = fmtINR(d.trade_size_inr);
+    $('maxDailyLoss').textContent = fmtINR(d.max_daily_loss_inr);
+    $('usdInrRate').textContent = '₹' + fmtNum(d.usd_inr_rate, 2);
+
+    // ── Position ──
+    const pos = d.position;
+    const posBody = $('positionBody');
+    if (pos && pos.entry_price) {
+      const isLong = pos.side === 'BUY';
+      const pnlColor = pos.unrealized_pnl >= 0 ? 'val-green' : 'val-red';
+      const pnlPctColor = pos.unrealized_pnl_pct >= 0 ? 'val-green' : 'val-red';
+      posBody.innerHTML = `
+        <div class="info-row"><span class="info-label">Side</span><span class="info-value ${isLong?'val-green':'val-red'}">${pos.side === 'BUY' ? '🟢 LONG' : '🔴 SHORT'}</span></div>
+        <div class="info-row"><span class="info-label">Entry Price</span><span class="info-value">${fmtUSD(pos.entry_price)}</span></div>
+        <div class="info-row"><span class="info-label">Mark Price</span><span class="info-value">${fmtUSD(pos.mark_price)}</span></div>
+        <div class="info-row"><span class="info-label">Quantity</span><span class="info-value">${fmtNum(pos.quantity, 6)} BTC</span></div>
+        <div class="info-row"><span class="info-label">USDT Invested</span><span class="info-value">${fmtUSD(pos.usdt_invested)}</span></div>
+        <div class="info-row"><span class="info-label">INR Invested</span><span class="info-value">${fmtINR(pos.inr_invested)}</span></div>
+        <div style="border-top:1px solid var(--border);margin:8px 0"></div>
+        <div class="info-row"><span class="info-label">Unrealized P&L</span><span class="info-value ${pnlColor}">${pos.unrealized_pnl >= 0 ? '+' : ''}${fmtUSD(pos.unrealized_pnl)}</span></div>
+        <div class="info-row"><span class="info-label">Unrealized P&L %</span><span class="info-value ${pnlPctColor}">${pos.unrealized_pnl_pct >= 0 ? '+' : ''}${fmtPct(pos.unrealized_pnl_pct)}</span></div>
+        <div class="info-row"><span class="info-label">Trailing Stop</span><span class="info-value val-yellow">${fmtUSD(pos.trailing_stop_price)}</span></div>
+        <div class="info-row"><span class="info-label">Highest Price</span><span class="info-value val-green">${fmtUSD(pos.highest_price)}</span></div>
+        <div class="info-row"><span class="info-label">Lowest Price</span><span class="info-value val-red">${fmtUSD(pos.lowest_price)}</span></div>
+      `;
+    } else {
+      posBody.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:20px">No open position</div>';
+    }
+
+    // ── Bollinger Bands ──
+    const bb = d.bb_result;
+    if (bb) {
+      $('bbUpper').textContent = fmtUSD(bb.upper);
+      $('bbSma').textContent = fmtUSD(bb.sma);
+      $('bbLower').textContent = fmtUSD(bb.lower);
+      $('bbWidth').textContent = fmtUSD(bb.width);
+      $('bbVol').textContent = fmtUSD(bb.volatility);
+      updateBBBar(bb.upper, bb.lower, bb.sma, d.current_price);
+    }
+
+    // ── Signal ──
+    const signal = d.signal || 'NONE';
+    const sigEl = $('signalVal');
+    sigEl.textContent = signal;
+    if (signal === 'LONG') { sigEl.className = 'info-value val-green'; }
+    else if (signal === 'SHORT') { sigEl.className = 'info-value val-red'; }
+    else { sigEl.className = 'info-value'; }
+    $('signalReason').textContent = d.signal_reason || '--';
+    $('signalDist').textContent = fmtPct(d.signal_distance);
+
+    // ── Nearest Trade Prediction ──
+    updatePrediction(d);
+
+    // ── Strategy Config ──
+    $('cfgBBPeriod').textContent = d.bb_period || 20;
+    $('cfgBBStdDev').textContent = d.bb_stddev || 2.0;
+    $('cfgCandleTF').textContent = d.candle_tf || '5m';
+    $('cfgNearThresh').textContent = fmtPct((d.near_threshold || 0.005) * 100);
+    $('cfgTrailPct').textContent = fmtPct((d.trail_pct || 0.005) * 100);
+    $('cfgPollInt').textContent = (d.poll_interval || 5.0).toFixed(1) + 's';
+
+    // ── Daily P&L ──
+    const stats = d.daily_stats || {};
+    $('pnlTradesToday').textContent = stats.total_trades || 0;
+    $('pnlWinLoss').textContent = (stats.winning_trades || 0) + ' / ' + (stats.losing_trades || 0);
+    const dpUsdt = stats.total_pnl_usdt || 0;
+    $('pnlDailyUsdt').textContent = (dpUsdt >= 0 ? '+' : '') + fmtUSD(dpUsdt);
+    $('pnlDailyUsdt').className = 'info-value ' + (dpUsdt >= 0 ? 'val-green' : 'val-red');
+    const dpInr = stats.total_pnl_inr || 0;
+    $('pnlDailyInr').textContent = (dpInr >= 0 ? '+' : '') + fmtINR(dpInr);
+    $('pnlDailyInr').className = 'info-value ' + (dpInr >= 0 ? 'val-green' : 'val-red');
+    $('pnlMaxTrades').textContent = (stats.max_trades || d.max_trades_per_day || 10) + '/day';
+    $('pnlTradeLimit').textContent = (stats.trades_today || 0) + ' / ' + (d.max_trades_per_day || 10);
+
+    // ── Recent Trades ──
+    const trades = d.recent_trades || [];
+    const tbody = $('tradesTbody');
+    if (trades.length > 0) {
+      tbody.innerHTML = trades.slice().reverse().map((t, i) => {
+        const pnlCls = t.pnl_usdt >= 0 ? 'val-green' : 'val-red';
+        const pnlSign = t.pnl_usdt >= 0 ? '+' : '';
+        return `<tr>
+          <td>${t.id || i+1}</td>
+          <td style="color:${t.side==='LONG'?'var(--green)':'var(--red)'}">${t.side}</td>
+          <td>${fmtUSD(t.entry_price)}</td>
+          <td>${fmtUSD(t.exit_price)}</td>
+          <td>${fmtNum(t.quantity,6)}</td>
+          <td class="${pnlCls}">${pnlSign}${fmtUSD(t.pnl_usdt)}</td>
+          <td class="${pnlCls}">${pnlSign}${fmtINR(t.pnl_inr)}</td>
+          <td>${t.exit_reason || '--'}</td>
+          <td style="color:var(--text-dim)">${fmtTime(t.exit_time)}</td>
+        </tr>`;
+      }).join('');
+    } else {
+      tbody.innerHTML = '<tr><td colspan="9" style="color:var(--text-muted);text-align:center;padding:16px">No trades yet today</td></tr>';
+    }
+
+    // ── Log lines (add new entries) ──
+    const logs = d.logs || [];
+    if (logs.length > 0) {
+      const hash = JSON.stringify(logs.slice(0, 5));
+      if (hash !== lastLogHash) {
+        lastLogHash = hash;
+        for (const l of logs) {
+          addLog(l.time, l.msg, l.cls || '');
+        }
+      }
+    }
+
+    // ── Error display ──
+    if (d.last_error && d.last_error !== 'None' && d.last_error !== '') {
+      addLog(fmtTimeShort(Date.now()/1000), '⚠️ ' + d.last_error, 'log-error');
+    }
+
+    // Mark flash on cycle change
+    if (d.cycle_count !== prevCycle) {
+      document.body.classList.add('flash-updated');
+      setTimeout(() => document.body.classList.remove('flash-updated'), 400);
+      prevCycle = d.cycle_count;
+    }
+
+  } catch(err) {
+    addLog(fmtTimeShort(Date.now()/1000), 'API error: ' + err.message, 'log-error');
+  }
+  setTimeout(poll, POLL_MS);
+}
+
+// ── Save setting ──
+async function saveSetting(key, inputId) {
+  let value = null;
+  if (inputId) {
+    const el = $(inputId);
+    value = el.value;
+    if (el.type === 'number' || el.tagName === 'SELECT') {
+      // try numeric
+      const num = Number(value);
+      if (!isNaN(num) && value !== '') value = num;
+    }
+  }
+
+  const fb = $('settingsFeedback');
+  fb.style.display = 'block';
+  fb.textContent = 'Saving...';
+  fb.style.color = 'var(--text-dim)';
+
+  try {
+    const resp = await fetch(CONFIG_API, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({key: key, value: value})
+    });
+    const r = await resp.json();
+    if (r.ok) {
+      fb.textContent = '✓ Saved: ' + key + ' = ' + (value !== null ? value : '(toggled)');
+      fb.style.color = 'var(--green)';
+      // Flash the button
+      if (inputId) {
+        const btn = $(inputId).nextElementSibling;
+        if (btn && btn.tagName === 'BUTTON') {
+          btn.classList.add('saved');
+          setTimeout(() => btn.classList.remove('saved'), 1000);
+        }
+      }
+    } else {
+      fb.textContent = '✗ Error: ' + (r.error || 'unknown');
+      fb.style.color = 'var(--red)';
+    }
+  } catch(err) {
+    fb.textContent = '✗ Network error: ' + err.message;
+    fb.style.color = 'var(--red)';
+  }
+  setTimeout(() => { fb.style.display = 'none'; }, 3000);
+}
+
+// ── Init ──
+poll();
+</script>
+
+</body>
+</html>

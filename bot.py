@@ -37,6 +37,7 @@ from exchange_client import (
 from strategy import BollingerBandStrategy, BBResult, SignalResult
 from risk_manager import RiskManager, TradeRecord
 from cli_display import CLIDisplay
+import web_api
 
 # ─── Logging Setup ───
 logger = logging.getLogger("bot")
@@ -74,6 +75,9 @@ class TradingBot:
         self.paper_balance: Dict[str, float] = {"USDT": 10000.0, "BTC": 0.0}
         self.paper_entry_price: float = 0.0
         self.paper_quantity: float = 0.0
+
+        # Register web API config callback
+        web_api.set_config_callback(self._handle_web_config)
 
         # Register signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -600,6 +604,188 @@ class TradingBot:
                 logger.info("Shutdown requested from interactive display")
                 self.running = False
 
+    def _handle_web_config(self, key: str, value):
+        """Apply a config change received from the web dashboard."""
+        try:
+            if key == "toggle_pause":
+                self.paused = not self.paused
+                self.display.paused = self.paused
+                logger.info(f"{'PAUSED' if self.paused else 'RESUMED'} trading via web dashboard")
+                return
+
+            if key == "trade_size_inr":
+                self.cfg.risk.trade_size_inr = float(value)
+                logger.info(f"[Web] trade_size_inr = {value}")
+            elif key == "leverage":
+                lev = int(value)
+                self.cfg.exchange.leverage = lev
+                try:
+                    self.exchange.set_leverage(lev, self.cfg.exchange.contract_name)
+                    logger.info(f"[Web] Leverage updated to {lev}x")
+                except Exception as e:
+                    logger.error(f"[Web] Leverage update failed: {e}")
+            elif key == "symbol":
+                old = self.cfg.exchange.symbol
+                self.cfg.exchange.symbol = value
+                try:
+                    self.exchange = create_exchange_client(self.cfg)
+                    logger.info(f"[Web] Symbol changed: {old} -> {value}")
+                except Exception as e:
+                    logger.error(f"[Web] Symbol change failed: {e}")
+            elif key == "contract_name":
+                self.cfg.exchange.contract_name = value
+                logger.info(f"[Web] contract_name = {value}")
+            elif key == "bb_period":
+                self.cfg.strategy.bb_period = int(value)
+                self.strategy = BollingerBandStrategy(self.cfg.strategy)
+                logger.info(f"[Web] bb_period = {value}")
+            elif key == "bb_stddev":
+                self.cfg.strategy.bb_stddev = float(value)
+                self.strategy = BollingerBandStrategy(self.cfg.strategy)
+                logger.info(f"[Web] bb_stddev = {value}")
+            elif key == "near_threshold":
+                self.cfg.strategy.near_threshold = float(value) / 100.0
+                self.strategy = BollingerBandStrategy(self.cfg.strategy)
+                logger.info(f"[Web] near_threshold = {value}%")
+            elif key == "trail_pct":
+                self.cfg.strategy.trail_pct = float(value) / 100.0
+                self.strategy = BollingerBandStrategy(self.cfg.strategy)
+                logger.info(f"[Web] trail_pct = {value}%")
+            elif key == "poll_interval":
+                self.cfg.poll_interval_sec = float(value)
+                logger.info(f"[Web] poll_interval = {value}s")
+        except Exception as e:
+            logger.error(f"[Web] Config update error ({key}={value}): {e}")
+
+    def _push_web_state(self):
+        """Serialize current bot state and push to the web API server."""
+        try:
+            balances = self.fetch_balances()
+            usdt_balance = 0.0
+            for asset, val in balances.items():
+                if asset == "USDT":
+                    usdt_balance = float(val.get("free", val)) if isinstance(val, dict) else float(val)
+
+            price_change_pct = 0.0
+            high_24h = 0.0
+            low_24h = 0.0
+            volume_24h = 0.0
+            try:
+                ticker = self.exchange.fetch_ticker()
+                price_change_pct = float(ticker.get("priceChangePercent", 0))
+                high_24h = float(ticker.get("highPrice", 0))
+                low_24h = float(ticker.get("lowPrice", 0))
+                volume_24h = float(ticker.get("volume", 0))
+            except Exception:
+                pass
+
+            signal = self.strategy.detect_entry_signal()
+
+            nearest = {"direction": "", "distance_pct": 0.0, "trigger_price": 0.0}
+            if self.current_bb and self.current_bb.sma > 0 and self.current_price > 0:
+                bb = self.current_bb
+                dist_upper = abs(self.current_price - bb.upper)
+                dist_lower = abs(self.current_price - bb.lower)
+                if dist_upper <= dist_lower:
+                    nearest["direction"] = "SHORT"
+                    nearest["trigger_price"] = bb.upper
+                    nearest["distance_pct"] = dist_upper / self.current_price * 100
+                else:
+                    nearest["direction"] = "LONG"
+                    nearest["trigger_price"] = bb.lower
+                    nearest["distance_pct"] = dist_lower / self.current_price * 100
+
+            bb_data = None
+            if self.current_bb:
+                bb_data = {
+                    "upper": self.current_bb.upper,
+                    "sma": self.current_bb.sma,
+                    "lower": self.current_bb.lower,
+                    "width": self.current_bb.width,
+                    "volatility": self.current_bb.volatility,
+                }
+
+            pos_data = None
+            if self.position:
+                pos_data = {
+                    "side": self.position.side,
+                    "entry_price": self.position.entry_price,
+                    "mark_price": self.position.mark_price,
+                    "quantity": self.position.quantity,
+                    "usdt_invested": self.position.usdt_invested,
+                    "inr_invested": self.position.inr_invested,
+                    "unrealized_pnl": self.position.unrealized_pnl,
+                    "unrealized_pnl_pct": self.position.unrealized_pnl_pct,
+                    "trailing_stop_price": self.position.trailing_stop_price,
+                    "highest_price": self.position.highest_price,
+                    "lowest_price": self.position.lowest_price,
+                }
+
+            recent = []
+            for t in self.risk_manager.get_recent_trades(20):
+                recent.append({
+                    "id": t.id,
+                    "side": t.side,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "quantity": t.quantity,
+                    "pnl_usdt": t.pnl_usdt,
+                    "pnl_inr": t.pnl_inr,
+                    "exit_reason": t.exit_reason,
+                    "exit_time": t.exit_time,
+                })
+
+            daily = {
+                "date": self.risk_manager._current_date if hasattr(self.risk_manager, "_current_date") else datetime.now(IST).strftime("%Y-%m-%d"),
+                "total_trades": self.risk_manager.trades_today,
+                "winning_trades": sum(1 for t in self.risk_manager.get_recent_trades(100) if t.pnl_usdt > 0),
+                "total_pnl_usdt": self.risk_manager.daily_pnl_usdt,
+                "total_pnl_inr": self.risk_manager.daily_pnl_inr,
+                "is_locked": self.risk_manager._is_locked if hasattr(self.risk_manager, "_is_locked") else False,
+            }
+
+            state = {
+                "current_price": self.current_price,
+                "price_change_pct": price_change_pct,
+                "high_24h": high_24h,
+                "low_24h": low_24h,
+                "volume_24h": volume_24h,
+                "usdt_balance": usdt_balance,
+                "inr_value": usdt_balance * self.cfg.risk.usd_inr_rate,
+                "trade_size_inr": self.cfg.risk.trade_size_inr,
+                "max_daily_loss_inr": self.cfg.risk.max_daily_loss_inr,
+                "usd_inr_rate": self.cfg.risk.usd_inr_rate,
+                "symbol": self.cfg.exchange.symbol,
+                "leverage": self.cfg.exchange.leverage,
+                "cycle_count": self.cycle_count,
+                "paused": self.paused,
+                "daily_locked": self.risk_manager._is_locked if hasattr(self.risk_manager, "_is_locked") else False,
+                "paper_trading": self.cfg.paper_trading,
+                "position": pos_data,
+                "bb_result": bb_data,
+                "signal": signal.signal,
+                "signal_reason": signal.reason,
+                "signal_distance": signal.near_distance_pct,
+                "nearest_trade_direction": nearest["direction"],
+                "nearest_trade_distance_pct": nearest["distance_pct"],
+                "nearest_trade_trigger_price": nearest["trigger_price"],
+                "bb_period": self.cfg.strategy.bb_period,
+                "bb_stddev": self.cfg.strategy.bb_stddev,
+                "candle_tf": self.cfg.strategy.candle_tf,
+                "near_threshold": self.cfg.strategy.near_threshold * 100,
+                "trail_pct": self.cfg.strategy.trail_pct * 100,
+                "poll_interval": self.cfg.poll_interval_sec,
+                "daily_stats": daily,
+                "recent_trades": recent,
+                "last_error": self.last_error,
+                "contract_name": self.cfg.exchange.contract_name,
+                "max_trades_per_day": self.cfg.risk.max_trades_per_day,
+            }
+
+            web_api.update_state(state)
+        except Exception:
+            pass
+
     # ─── MAIN CYCLE ───
 
     def run_cycle(self):
@@ -697,6 +883,9 @@ class TradingBot:
             recent_trades=recent_trades,
         )
 
+        # Also push state to web dashboard
+        self._push_web_state()
+
     # ─── RUN LOOP ───
 
     def run(self):
@@ -723,6 +912,13 @@ class TradingBot:
             self.display.start_live_display()
         except Exception as e:
             logger.warning(f"Live display start failed: {e}. Running in log-only mode.")
+
+        # Start web API server
+        try:
+            web_api.start_server(host="0.0.0.0", port=8080)
+            logger.info("Web dashboard: http://0.0.0.0:8080")
+        except Exception as e:
+            logger.warning(f"Web server start failed: {e}")
 
         logger.info("Bot loop started. Press Ctrl+C to stop.")
 
@@ -782,6 +978,12 @@ class TradingBot:
         # Stop display
         try:
             self.display.stop_live_display()
+        except Exception:
+            pass
+
+        # Stop web API server
+        try:
+            web_api.stop_server()
         except Exception:
             pass
 
