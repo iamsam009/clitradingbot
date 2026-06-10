@@ -264,7 +264,7 @@ class SharkExClient:
 
                 self._last_request_time = time.time()
 
-                if resp.status_code == 200:
+                if resp.status_code in (200, 201):
                     return resp.json()
                 elif resp.status_code == 429:
                     logger.warning("Rate-limited by SharkEx API. Waiting 5 s …")
@@ -370,16 +370,26 @@ class SharkExClient:
             logger.error(f"Failed to fetch klines: {resp.get('message')}")
             return []
 
-        # Response is an array of arrays (Binance-style):
-        #   [openTime, open, high, low, close, volume, closeTime,
-        #    quoteVolume, trades, takerBuyBaseVol, takerBuyQuoteVol, ignored]
+        # SharkEx returns klines as an array of objects:
+        #   [{"startTime":"...", "open":"...", "high":"...", "low":"...",
+        #     "close":"...", "endTime":"..."}]
         candles: List[Dict[str, Any]] = []
         data = resp if isinstance(resp, list) else resp.get("data", resp)
         if not isinstance(data, list):
             return candles
 
         for row in data:
-            if isinstance(row, list) and len(row) >= 6:
+            if isinstance(row, dict):
+                candles.append({
+                    "timestamp": int(row.get("startTime", row.get("timestamp", 0))),
+                    "open": float(row.get("open", 0)),
+                    "high": float(row.get("high", 0)),
+                    "low": float(row.get("low", 0)),
+                    "close": float(row.get("close", 0)),
+                    "volume": float(row.get("volume", 0)),
+                })
+            elif isinstance(row, list) and len(row) >= 6:
+                # Fallback: Binance-style array format
                 candles.append({
                     "timestamp": int(row[0]),
                     "open": float(row[1]),
