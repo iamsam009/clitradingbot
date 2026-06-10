@@ -999,11 +999,11 @@ class TradingBot:
                 if signal.signal != "NONE":
                     self.display.print_signal_detected(signal.signal, signal.reason)
                     self.execute_entry(signal)
-                elif self.cycle_count % 30 is 1:
+                elif self.cycle_count % 30 == 1:
                     logger.info(f"[Cycle {self.cycle_count}] No signal: {signal.reason}")
                     logger.info(f"  Price: ${self.current_price:.2f} | BB U: {signal.bb.upper:.2f} L: {signal.bb.lower:.2f} SMA: {signal.bb.sma:.2f}")
             elif self.position is None and not in_session:
-                if self.cycle_count % 60 is 1:
+                if self.cycle_count % 60 == 1:
                     now = datetime.now(IST)
                     logger.info(f"[Cycle {self.cycle_count}] Outside trading session ({now.strftime('%H:%M IST')}) — waiting for next session window")
 
