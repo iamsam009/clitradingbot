@@ -755,12 +755,30 @@ def main():
     )
     args = parser.parse_args()
 
-    # Load .env file into os.environ before reading config
-    # (python-dotenv is in requirements.txt but never called anywhere)
-    from dotenv import load_dotenv
-    env_path = args.config or os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.isfile(env_path):
-        load_dotenv(env_path)
+    # Load .env file into os.environ before reading config.
+    # find_dotenv() walks up from CWD looking for .env — the most robust
+    # approach.  Also tries __file__-relative as explicit fallback.
+    from dotenv import load_dotenv, find_dotenv
+
+    env_path = args.config or find_dotenv()
+    if env_path:
+        loaded = load_dotenv(env_path)
+    else:
+        loaded = load_dotenv(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), ".env"
+        ))
+
+    # Temporary debug — remove once confirmed working
+    import sys as _sys
+    _sys.stderr.write(
+        f"[DEBUG] .env path tried: {env_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')}\n"
+    )
+    _sys.stderr.write(
+        f"[DEBUG] load_dotenv returned: {loaded}\n"
+    )
+    _sys.stderr.write(
+        f"[DEBUG] SHARKEX_API_KEY = {'SET' if os.getenv('SHARKEX_API_KEY') else 'EMPTY'}\n"
+    )
 
     # Load configuration
     if args.no_interactive:
