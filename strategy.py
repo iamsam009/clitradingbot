@@ -194,44 +194,58 @@ class BollingerBandStrategy:
 
         threshold = self.cfg.near_threshold
 
+        # Band-distance calculations for diagnostics
+        dist_to_lower_pct = ((close - lower) / lower) * 100 if lower > 0 else 999
+        dist_to_upper_pct = ((upper - close) / upper) * 100 if upper > 0 else 999
+        candle_color = "GREEN" if close > open_p else ("RED" if close < open_p else "DOJI")
+
         # ---- LONG SIGNAL ----
+        # BB reversal: price wicked below lower band and closed back above it,
+        # OR price is hugging the lower band from above within threshold.
+        # Check if the candle's LOW wicked below the lower band (true reversal).
+        wicked_below = low < lower
+        close_near_lower = close > lower and (close - lower) / close < threshold
+
         if close > open_p:  # Green candle
-            if close > lower:  # Close is above lower band (not below)
-                # Calculate how close: (close - lower) / close
+            if close_near_lower or (wicked_below and close > lower):
+                # Actual distance for the signal
                 distance_pct = (close - lower) / close
-                if distance_pct < threshold:
-                    return SignalResult(
-                        signal="LONG",
-                        candle_close=close,
-                        candle_open=open_p,
-                        candle_high=high,
-                        candle_low=low,
-                        candle_time=float(candle["timestamp"].timestamp()),
-                        bb=BBResult(sma=sma, upper=upper, lower=lower,
-                                    width=upper - lower, volatility=bb_std),
-                        near_distance_pct=distance_pct * 100,
-                        reason=f"Green candle near lower band. Distance: {distance_pct*100:.3f}% < {threshold*100:.2f}%",
-                    )
+                trigger = "wicked below" if wicked_below else "near"
+                return SignalResult(
+                    signal="LONG",
+                    candle_close=close,
+                    candle_open=open_p,
+                    candle_high=high,
+                    candle_low=low,
+                    candle_time=float(candle["timestamp"].timestamp()),
+                    bb=BBResult(sma=sma, upper=upper, lower=lower,
+                                width=upper - lower, volatility=bb_std),
+                    near_distance_pct=distance_pct * 100,
+                    reason=f"Green candle {trigger} lower band. Close-to-lower: {distance_pct*100:.3f}% < {threshold*100:.2f}%",
+                )
 
         # ---- SHORT SIGNAL ----
         if self.cfg.short_enabled and close < open_p:  # Red candle + SHORT enabled
-            if close < upper:  # Close is below upper band
-                # Calculate how close: (upper - close) / close
-                distance_pct = (upper - close) / close
-                if distance_pct < threshold:
-                    return SignalResult(
-                        signal="SHORT",
-                        candle_close=close,
-                        candle_open=open_p,
-                        candle_high=high,
-                        candle_low=low,
-                        candle_time=float(candle["timestamp"].timestamp()),
-                        bb=BBResult(sma=sma, upper=upper, lower=lower,
-                                    width=upper - lower, volatility=bb_std),
-                        near_distance_pct=distance_pct * 100,
-                        reason=f"Red candle near upper band. Distance: {distance_pct*100:.3f}% < {threshold*100:.2f}%",
-                    )
+            wicked_above = high > upper
+            close_near_upper = close < upper and (upper - close) / close < threshold
 
+            if close_near_upper or (wicked_above and close < upper):
+                distance_pct = (upper - close) / close
+                trigger = "wicked above" if wicked_above else "near"
+                return SignalResult(
+                    signal="SHORT",
+                    candle_close=close,
+                    candle_open=open_p,
+                    candle_high=high,
+                    candle_low=low,
+                    candle_time=float(candle["timestamp"].timestamp()),
+                    bb=BBResult(sma=sma, upper=upper, lower=lower,
+                                width=upper - lower, volatility=bb_std),
+                    near_distance_pct=distance_pct * 100,
+                    reason=f"Red candle {trigger} upper band. Close-to-upper: {distance_pct*100:.3f}% < {threshold*100:.2f}%",
+                )
+
+        # ---- NO SIGNAL (with diagnostic info) ----
         return SignalResult(
             signal="NONE",
             candle_close=close,
@@ -241,8 +255,8 @@ class BollingerBandStrategy:
             candle_time=float(candle["timestamp"].timestamp()),
             bb=BBResult(sma=sma, upper=upper, lower=lower,
                         width=upper - lower, volatility=bb_std),
-            near_distance_pct=0,
-            reason="No signal conditions met",
+            near_distance_pct=max(abs(dist_to_lower_pct), abs(dist_to_upper_pct)),
+            reason=f"{candle_color} candle | Dist to lower: {dist_to_lower_pct:+.2f}% | Dist to upper: {dist_to_upper_pct:+.2f}% | Threshold: {threshold*100:.2f}%",
         )
 
     def check_take_profit(self, position: Position, current_price: float,
