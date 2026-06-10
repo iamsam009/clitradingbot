@@ -1,16 +1,16 @@
 """
-bot.py - Bollinger Band Reversal Trading Bot (Main Engine, 24/7)
+bot.py - BB Squeeze Breakout Trading Bot (Main Engine)
 
 Orchestrates all modules:
 - SharkEx v1 exchange connection & data fetching
-- Strategy signal detection (Bollinger Band reversal)
-- Order execution & trailing stop management
+- Strategy signal detection (Bollinger Squeeze Breakout, 15-min candles)
+- Order execution (limit + market fallback) & trailing stop management
 - Risk management enforcement
 - Live CLI display
+- Web dashboard (port 8080)
 
 Usage:
     python bot.py          # Interactive setup (asks for API keys)
-    python bot.py --paper  # Paper trading mode (no real orders)
     python bot.py --no-interactive  # Use .env or defaults, no prompts
 """
 
@@ -150,9 +150,13 @@ def setup_file_logging(log_dir: str = None):
 
 class TradingBot:
     """
-    Main bot class that orchestrates the entire trading system.
+    Live spot trading bot using BB Squeeze Breakout on 15-min candles.
+
     Trades during 3 IST sessions: 09:30-12:00, 13:00-15:30, 19:00-22:00.
     Exits and data fetching run 24/7.
+
+    Entry: limit order at bid, market fallback after 10 seconds.
+    Exit:  trailing stop only (no take-profit).
     """
 
     def __init__(self, cfg: BotConfig):
@@ -174,11 +178,6 @@ class TradingBot:
         # Web log buffer (circular, max 200 entries)
         self.web_logs: List[Dict[str, str]] = []
         self._trade_logger = logging.getLogger("bot.trade")
-
-        # Paper trading
-        self.paper_balance: Dict[str, float] = {"USDT": 10000.0, "BTC": 0.0}
-        self.paper_entry_price: float = 0.0
-        self.paper_quantity: float = 0.0
 
         # Register web API config callback
         web_api.set_config_callback(self._handle_web_config)
@@ -232,13 +231,13 @@ class TradingBot:
             # Fetch OHLCV
             ohlcv = self.exchange.fetch_ohlcv(
                 timeframe=self.cfg.strategy.candle_tf,
-                limit=self.cfg.strategy.candles_window,
+                limit=self.cfg.strategy.data_window,
             )
             if not ohlcv or len(ohlcv) < self.cfg.strategy.bb_period:
                 logger.warning(f"Insufficient OHLCV data: {len(ohlcv) if ohlcv else 0} candles")
                 return False
 
-            # Prepare DataFrame and calculate BB
+            # Prepare DataFrame and calculate BB indicators
             self.strategy.prepare_dataframe(ohlcv)
             self.current_bb = self.strategy.get_latest_bb()
 
@@ -267,11 +266,6 @@ class TradingBot:
         display.
         """
         try:
-            if self.cfg.paper_trading:
-                return {
-                    "USDT": {"free": self.paper_balance["USDT"], "total": self.paper_balance["USDT"]},
-                    "BTC": {"free": self.paper_balance["BTC"], "total": self.paper_balance["BTC"]},
-                }
             raw = self.exchange.fetch_balance()
 
             # If the exchange returned an INR balance (INR-margined account),
@@ -295,10 +289,27 @@ class TradingBot:
 
     # ─── ENTRY LOGIC ───
 
+    def _get_bid_price(self) -> float:
+        """Get best bid price from order book for limit entry."""
+        try:
+            # Use ticker best bid
+            ticker = self.exchange.fetch_ticker()
+            bid = float(ticker.get("bidPrice", 0) or ticker.get("lastPrice", 0))
+            if bid > 0:
+                return bid
+        except Exception:
+            pass
+        return self.current_price
+
     def execute_entry(self, signal: SignalResult) -> bool:
         """
-        Execute a market entry based on the signal.
-        
+        Execute entry based on the squeeze breakout signal.
+
+        Strategy:
+        1. Place LIMIT order at current best bid.
+        2. Wait up to ``limit_order_timeout`` seconds for fill.
+        3. If not filled, cancel limit and place MARKET order.
+
         Returns True if entry was successful.
         """
         if self.position is not None:
@@ -306,7 +317,7 @@ class TradingBot:
             return False
 
         # Validate signal
-        if signal.signal == "NONE":
+        if signal.signal != "LONG":
             return False
 
         # Check risk limits
@@ -317,8 +328,6 @@ class TradingBot:
         # Calculate position size
         trade_usdt = self.cfg.risk.trade_size_inr / self.cfg.risk.usd_inr_rate
         quantity = trade_usdt / signal.candle_close
-
-        # Round quantity to appropriate precision
         quantity = self._round_quantity(quantity)
 
         if quantity <= 0:
@@ -327,98 +336,122 @@ class TradingBot:
 
         # Check sufficient balance
         balances = self.fetch_balances()
-        if self.cfg.paper_trading:
-            if self.paper_balance["USDT"] < trade_usdt:
-                logger.warning(f"Insufficient paper USDT: {self.paper_balance['USDT']:.2f} < {trade_usdt:.2f}")
-                return False
-        else:
-            usdt_free = balances.get("USDT", {}).get("free", 0)
-            if usdt_free < trade_usdt:
-                logger.warning(f"Insufficient USDT balance: {usdt_free:.2f} < {trade_usdt:.2f}")
-                return False
+        usdt_free = balances.get("USDT", {}).get("free", 0)
+        if usdt_free < trade_usdt:
+            logger.warning(f"Insufficient USDT balance: {usdt_free:.2f} < {trade_usdt:.2f}")
+            return False
 
-        # Determine order side
-        if signal.signal == "LONG":
-            side = "buy"
-            position_side = OrderSide.BUY
-        else:
-            side = "sell"
-            position_side = OrderSide.SELL
+        # LONG → buy
+        side = "buy"
+        position_side = OrderSide.BUY
 
-        if self.cfg.paper_trading:
-            # Paper trading execution
-            entry_price = signal.candle_close
-            self.paper_balance["USDT"] -= trade_usdt
-            self.paper_balance["BTC"] += quantity
-            self.paper_entry_price = entry_price
-            self.paper_quantity = quantity
+        # ── Step 1: Limit order at bid ──
+        bid_price = self._get_bid_price()
+        # Ensure limit price is ≤ current mid (bid should already be)
+        if bid_price <= 0 or bid_price > self.current_price * 1.01:
+            bid_price = round(self.current_price * 0.999, 4)
 
-            # Create position
-            self.position = Position(
-                symbol=self.cfg.exchange.symbol,
-                side=position_side,
-                entry_price=entry_price,
-                quantity=quantity,
-                usdt_invested=trade_usdt,
-                inr_invested=self.cfg.risk.trade_size_inr,
-                entry_time=time.time(),
-                highest_price=entry_price,
-                lowest_price=entry_price,
-                trailing_stop_price=self.strategy.calculate_initial_stop(
-                    Position("", position_side, entry_price, quantity, trade_usdt, 0, 0)
-                ),
-            )
+        logger.info(f"Placing LIMIT buy: {quantity:.6f} BTC @ ${bid_price:.4f} (bid)")
+        limit_order = self.exchange.create_limit_order(side, quantity, bid_price)
 
-            self.display.print_trade_executed(
-                signal.signal, entry_price, quantity, trade_usdt, self.cfg.risk.trade_size_inr
-            )
-            logger.info(f"📝 PAPER {signal.signal} @ ${entry_price:.2f} | Qty: {quantity:.6f} BTC")
-            self._add_web_log(f"📝 PAPER {signal.signal} @ ${entry_price:.2f} | Qty: {quantity:.6f}", "log-entry")
-            self._trade_logger.info(f"PAPER {signal.signal} | Entry: ${entry_price:.2f} | Qty: {quantity:.6f}")
-            return True
-        else:
-            # Real exchange execution
-            order = self.exchange.create_market_order(side, quantity)
+        if limit_order is None:
+            # Limit order failed outright — fallback to market
+            logger.warning("Limit order creation failed, falling back to market")
+            return self._execute_market_entry(side, position_side, quantity, trade_usdt, signal)
+
+        fill_price = self._wait_for_fill(limit_order.id, bid_price, self.cfg.strategy.limit_order_timeout)
+
+        if fill_price is not None:
+            # Limit order filled
+            return self._complete_entry(position_side, fill_price, quantity, trade_usdt, signal, "LIMIT")
+
+        # ── Step 2: Cancel limit and market fallback ──
+        logger.info("Limit order not filled in time, switching to MARKET")
+        self.exchange.cancel_order(limit_order.id)
+        return self._execute_market_entry(side, position_side, quantity, trade_usdt, signal)
+
+    def _wait_for_fill(self, order_id: str, limit_price: float, timeout: int) -> Optional[float]:
+        """Poll order status for up to ``timeout`` seconds.  Return fill price or None."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            order = self.exchange.fetch_order(order_id)
             if order is None:
-                logger.error("Market order failed!")
-                self.display.print_error("Market order execution failed")
-                return False
+                time.sleep(0.5)
+                continue
 
-            avg_price = order.average_price if order.average_price > 0 else self.current_price
-            actual_filled = order.filled if order.filled > 0 else quantity
+            if order.status == OrderStatus.FILLED:
+                avg = order.average_price if order.average_price > 0 else limit_price
+                logger.info(f"Limit order filled @ ${avg:.4f}")
+                return avg
 
-            # Create position object
-            self.position = Position(
-                symbol=self.cfg.exchange.symbol,
-                side=position_side,
-                entry_price=avg_price,
-                quantity=actual_filled,
-                usdt_invested=avg_price * actual_filled,
-                inr_invested=(avg_price * actual_filled) * self.cfg.risk.usd_inr_rate,
-                entry_time=time.time(),
-                highest_price=avg_price,
-                lowest_price=avg_price,
-            )
+            if order.status == OrderStatus.CANCELLED:
+                logger.info("Limit order was cancelled externally")
+                return None
 
-            # Calculate initial trailing stop
-            self.position.trailing_stop_price = self.strategy.calculate_initial_stop(self.position)
+            time.sleep(0.5)
 
-            # Place stop-loss order (only if trailing stop is enabled)
-            if self.cfg.strategy.trailing_stop_enabled:
-                self._place_stop_order()
-            else:
-                logger.info("Trailing stop DISABLED — relying on take-profit only")
+        return None
 
-            self.display.print_trade_executed(
-                signal.signal, avg_price, actual_filled,
-                self.position.usdt_invested, self.position.inr_invested
-            )
+    def _execute_market_entry(
+        self, side: str, position_side: OrderSide,
+        quantity: float, trade_usdt: float, signal: SignalResult,
+    ) -> bool:
+        """Fallback market order execution."""
+        logger.info(f"Executing MARKET {side}: {quantity:.6f} BTC")
+        order = self.exchange.create_market_order(side, quantity)
+        if order is None:
+            logger.error("Market entry order failed!")
+            self.display.print_error("Market order execution failed")
+            return False
 
-            logger.info(f"✅ {signal.signal} @ ${avg_price:.2f} | Qty: {actual_filled:.6f}")
-            self._add_web_log(f"✅ ENTRY {signal.signal} @ ${avg_price:.2f} | Qty: {actual_filled:.6f}", "log-entry")
-            self._trade_logger.info(f"ENTRY {signal.signal} | Price: ${avg_price:.2f} | Qty: {actual_filled:.6f}")
+        avg_price = order.average_price if order.average_price > 0 else self.current_price
+        actual_filled = order.filled if order.filled > 0 else quantity
+        return self._complete_entry(position_side, avg_price, actual_filled, trade_usdt, signal, "MARKET")
 
-            return True
+    def _complete_entry(
+        self, position_side: OrderSide, entry_price: float,
+        quantity: float, trade_usdt: float, signal: SignalResult, order_type: str,
+    ) -> bool:
+        """Finalise a filled entry: create Position, place stop, log."""
+        # Create position object
+        self.position = Position(
+            symbol=self.cfg.exchange.symbol,
+            side=position_side,
+            entry_price=entry_price,
+            quantity=quantity,
+            usdt_invested=entry_price * quantity,
+            inr_invested=(entry_price * quantity) * self.cfg.risk.usd_inr_rate,
+            entry_time=time.time(),
+            highest_price=entry_price,
+            lowest_price=entry_price,
+        )
+
+        # Calculate initial trailing stop
+        self.position.trailing_stop_price = self.strategy.calculate_initial_stop(self.position)
+
+        # Place stop-loss order
+        self._place_stop_order()
+
+        self.display.print_trade_executed(
+            signal.signal, entry_price, quantity,
+            self.position.usdt_invested, self.position.inr_invested,
+        )
+
+        logger.info(
+            "✅ %s ENTRY [%s] @ $%.4f | Qty: %.6f | Stop: $%.4f",
+            signal.signal, order_type, entry_price, quantity,
+            self.position.trailing_stop_price,
+        )
+        self._add_web_log(
+            f"✅ ENTRY {signal.signal} [{order_type}] @ ${entry_price:.4f} | Qty: {quantity:.6f}",
+            "log-entry",
+        )
+        self._trade_logger.info(
+            f"ENTRY {signal.signal} [{order_type}] | Price: ${entry_price:.4f} | "
+            f"Qty: {quantity:.6f} | Stop: ${self.position.trailing_stop_price:.4f}"
+        )
+
+        return True
 
     def _place_stop_order(self) -> bool:
         """Place the initial stop-loss order for the current position."""
@@ -433,19 +466,25 @@ class TradingBot:
 
         stop_price = self.position.trailing_stop_price
 
-        if self.cfg.paper_trading:
-            logger.info(f"📝 PAPER Stop placed at ${stop_price:.2f}")
-            return True
-
-        order = self.exchange.create_stop_order(
-            side=stop_side,
-            quantity=self.position.quantity,
-            stop_price=stop_price,
-        )
+        # For LONG: use STOP_LOSS_LIMIT with limit_price slightly below stop
+        # to prevent slippage on the stop trigger.
+        if self.position.side == OrderSide.BUY:
+            limit_price = round(stop_price * 0.999, 4)
+            order = self.exchange.create_stop_order(
+                side=stop_side,
+                quantity=self.position.quantity,
+                stop_price=stop_price,
+            )
+        else:
+            order = self.exchange.create_stop_order(
+                side=stop_side,
+                quantity=self.position.quantity,
+                stop_price=stop_price,
+            )
 
         if order:
             self.position.stop_order_id = order.id
-            logger.info(f"Stop order placed: ID={order.id}, Price=${stop_price:.2f}")
+            logger.info(f"Stop order placed: ID={order.id}, Price=${stop_price:.4f}")
             return True
         else:
             logger.error("Failed to place stop order!")
@@ -458,9 +497,6 @@ class TradingBot:
         """
         if self.position is None:
             return False
-
-        if self.cfg.paper_trading:
-            return True
 
         # Cancel old stop order
         if self.position.stop_order_id:
@@ -490,7 +526,7 @@ class TradingBot:
 
         if order:
             self.position.stop_order_id = order.id
-            logger.info(f"Stop order updated: ID={order.id}, Price=${self.position.trailing_stop_price:.2f}")
+            logger.info(f"Stop order updated: ID={order.id}, Price=${self.position.trailing_stop_price:.4f}")
             return True
         else:
             logger.error("Failed to place new stop order!")
@@ -501,43 +537,35 @@ class TradingBot:
     def check_and_execute_exit(self) -> bool:
         """
         Check exit conditions and execute if triggered.
-        
+
+        Only uses trailing stop (no take-profit).
         Returns True if position was closed.
         """
-        if self.position is None or self.current_bb is None:
+        if self.position is None:
             return False
 
-        # 1. Check take-profit
-        if self.strategy.check_take_profit(self.position, self.current_price, self.current_bb):
-            self._close_position("TP")
+        # Update trailing stop
+        old_stop = self.position.trailing_stop_price
+        new_stop = self.strategy.update_trailing_stop(self.position, self.current_price)
+
+        if new_stop != old_stop:
+            self.position.trailing_stop_price = new_stop
+            # Trailing stop moved - update the stop order
+            if not self._update_stop_order():
+                # Stop order update failed - might mean it was filled
+                if self._check_stop_filled():
+                    self._close_position("SL")
+                    return True
+
+        # Check if stop loss is hit
+        if self.strategy.check_stop_loss(self.position, self.current_price):
+            self._close_position("SL")
             return True
-
-        # 2. Update trailing stop (only if enabled)
-        if self.cfg.strategy.trailing_stop_enabled:
-            old_stop = self.position.trailing_stop_price
-            new_stop = self.strategy.update_trailing_stop(self.position, self.current_price)
-
-            if new_stop != old_stop:
-                # Trailing stop moved - update the stop order
-                if not self._update_stop_order():
-                    # Stop order update failed - might mean it was filled
-                    # Check if position was closed by stop
-                    if self._check_stop_filled():
-                        self._close_position("SL")
-                        return True
-
-            # 3. Check if stop loss is hit
-            if self.strategy.check_stop_loss(self.position, self.current_price):
-                self._close_position("SL")
-                return True
 
         return False
 
     def _check_stop_filled(self) -> bool:
         """Check if the stop order was filled by querying the exchange."""
-        if self.cfg.paper_trading:
-            return False
-
         if self.position and self.position.stop_order_id:
             order = self.exchange.fetch_order(self.position.stop_order_id)
             if order and order.status == OrderStatus.FILLED:
@@ -546,58 +574,14 @@ class TradingBot:
 
     def _close_position(self, reason: str):
         """
-        Close the current position.
-        
+        Close the current position on the exchange.
+
         Args:
-            reason: "TP", "SL", or "MANUAL"
+            reason: "SL" (stop-loss) or "MANUAL" (emergency/user)
         """
         if self.position is None:
             return
 
-        if self.cfg.paper_trading:
-            # Paper trading exit
-            if self.position.side == OrderSide.BUY:
-                pnl_usdt = (self.current_price - self.paper_entry_price) * self.paper_quantity
-                self.paper_balance["BTC"] -= self.paper_quantity
-                self.paper_balance["USDT"] += self.paper_entry_price * self.paper_quantity + pnl_usdt
-            else:
-                pnl_usdt = (self.paper_entry_price - self.current_price) * self.paper_quantity
-                self.paper_balance["BTC"] += self.paper_quantity
-                self.paper_balance["USDT"] += self.paper_entry_price * self.paper_quantity + pnl_usdt
-
-            exit_price = self.current_price
-            quantity = self.paper_quantity
-
-            self.risk_manager.record_trade(
-                side="LONG" if self.position.side == OrderSide.BUY else "SHORT",
-                entry_price=self.paper_entry_price,
-                exit_price=exit_price,
-                quantity=quantity,
-                exit_reason=reason,
-                entry_time=self.position.entry_time,
-                exit_time=time.time(),
-            )
-
-            self.display.print_trade_exit(
-                "LONG" if self.position.side == OrderSide.BUY else "SHORT",
-                exit_price,
-                pnl_usdt,
-                pnl_usdt * self.cfg.risk.usd_inr_rate,
-                reason,
-            )
-
-            pnl_inr = pnl_usdt * self.cfg.risk.usd_inr_rate
-            pnl_cls = "log-profit" if pnl_usdt >= 0 else "log-loss"
-            logger.info(f"📝 PAPER EXIT {reason} | P&L: ${pnl_usdt:+.2f} (₹{pnl_inr:+.2f})")
-            self._add_web_log(f"📝 PAPER EXIT [{reason}] P&L: ${pnl_usdt:+.2f}", pnl_cls)
-            self._trade_logger.info(f"PAPER EXIT {reason} | P&L: ${pnl_usdt:+.2f} | ₹{pnl_inr:+.2f}")
-
-            self.position = None
-            self.paper_entry_price = 0.0
-            self.paper_quantity = 0.0
-            return
-
-        # Real exchange exit
         # Cancel any existing stop order
         if self.position.stop_order_id:
             self.exchange.cancel_order(self.position.stop_order_id)
@@ -642,9 +626,9 @@ class TradingBot:
 
             pnl_inr = pnl_usdt * self.cfg.risk.usd_inr_rate
             pnl_cls = "log-profit" if pnl_usdt >= 0 else "log-loss"
-            logger.info(f"✅ EXIT [{reason}] @ ${exit_price:.2f} | P&L: ${pnl_usdt:+.2f} (₹{pnl_inr:+.2f})")
+            logger.info(f"✅ EXIT [{reason}] @ ${exit_price:.4f} | P&L: ${pnl_usdt:+.2f} (₹{pnl_inr:+.2f})")
             self._add_web_log(f"✅ EXIT [{reason}] P&L: ${pnl_usdt:+.2f}", pnl_cls)
-            self._trade_logger.info(f"EXIT {reason} | Price: ${exit_price:.2f} | P&L: ${pnl_usdt:+.2f} | ₹{pnl_inr:+.2f}")
+            self._trade_logger.info(f"EXIT {reason} | Price: ${exit_price:.4f} | P&L: ${pnl_usdt:+.4f} | ₹{pnl_inr:+.2f}")
         else:
             logger.error("Failed to close position! Manual intervention may be required.")
             self.display.print_error("Failed to close position - check exchange!")
@@ -734,18 +718,6 @@ class TradingBot:
                             logger.error(f"   Failed to rebuild exchange client: {e}")
                             self.cfg.exchange.symbol = old_symbol
 
-                # If strategy trail_pct changed, update existing position's trailing stop
-                if config_path == "strategy.trail_pct" and self.position:
-                    if self.position.side == "LONG":
-                        self.position.trailing_stop = (
-                            self.position.highest_price * (1 - self.cfg.strategy.trail_pct)
-                        )
-                    else:
-                        self.position.trailing_stop = (
-                            self.position.lowest_price * (1 + self.cfg.strategy.trail_pct)
-                        )
-                    logger.info(f"   Position trailing stop recalculated: ${self.position.trailing_stop:,.2f}")
-
             elif action_type == "reset_daily":
                 self.risk_manager._current_date = ""
                 self.risk_manager.check_and_reset_daily()
@@ -794,22 +766,25 @@ class TradingBot:
                 self.cfg.strategy.bb_stddev = float(value)
                 self.strategy = BollingerBandStrategy(self.cfg.strategy)
                 logger.info(f"[Web] bb_stddev = {value}")
-            elif key == "near_threshold":
-                self.cfg.strategy.near_threshold = float(value) / 100.0
+            elif key == "squeeze_lookback":
+                self.cfg.strategy.squeeze_lookback = int(value)
                 self.strategy = BollingerBandStrategy(self.cfg.strategy)
-                logger.info(f"[Web] near_threshold = {value}%")
-            elif key == "trail_pct":
-                self.cfg.strategy.trail_pct = float(value) / 100.0
+                logger.info(f"[Web] squeeze_lookback = {value}")
+            elif key == "breakout_lookback":
+                self.cfg.strategy.breakout_lookback = int(value)
                 self.strategy = BollingerBandStrategy(self.cfg.strategy)
-                logger.info(f"[Web] trail_pct = {value}%")
+                logger.info(f"[Web] breakout_lookback = {value}")
+            elif key == "trailing_lookback":
+                self.cfg.strategy.trailing_lookback = int(value)
+                self.strategy = BollingerBandStrategy(self.cfg.strategy)
+                logger.info(f"[Web] trailing_lookback = {value}")
+            elif key == "limit_order_timeout":
+                self.cfg.strategy.limit_order_timeout = int(value)
+                logger.info(f"[Web] limit_order_timeout = {value}s")
             elif key == "short_enabled":
                 self.cfg.strategy.short_enabled = value if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes")
                 self.strategy = BollingerBandStrategy(self.cfg.strategy)
                 logger.info(f"[Web] short_enabled = {self.cfg.strategy.short_enabled}")
-            elif key == "trailing_stop_enabled":
-                self.cfg.strategy.trailing_stop_enabled = value if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes")
-                self.strategy = BollingerBandStrategy(self.cfg.strategy)
-                logger.info(f"[Web] trailing_stop_enabled = {self.cfg.strategy.trailing_stop_enabled}")
             elif key == "poll_interval":
                 self.cfg.poll_interval_sec = float(value)
                 logger.info(f"[Web] poll_interval = {value}s")
@@ -840,20 +815,7 @@ class TradingBot:
 
             signal = self.strategy.detect_entry_signal()
 
-            nearest = {"direction": "", "distance_pct": 0.0, "trigger_price": 0.0}
-            if self.current_bb and self.current_bb.sma > 0 and self.current_price > 0:
-                bb = self.current_bb
-                dist_upper = abs(self.current_price - bb.upper)
-                dist_lower = abs(self.current_price - bb.lower)
-                if dist_upper <= dist_lower:
-                    nearest["direction"] = "SHORT"
-                    nearest["trigger_price"] = bb.upper
-                    nearest["distance_pct"] = dist_upper / self.current_price * 100
-                else:
-                    nearest["direction"] = "LONG"
-                    nearest["trigger_price"] = bb.lower
-                    nearest["distance_pct"] = dist_lower / self.current_price * 100
-
+            # ── BB data ──
             bb_data = None
             if self.current_bb:
                 bb_data = {
@@ -864,10 +826,11 @@ class TradingBot:
                     "volatility": self.current_bb.volatility,
                 }
 
+            # ── Position data ──
             pos_data = None
             if self.position:
                 pos_data = {
-                    "side": self.position.side,
+                    "side": str(self.position.side),
                     "entry_price": self.position.entry_price,
                     "mark_price": self.position.mark_price,
                     "quantity": self.position.quantity,
@@ -880,6 +843,7 @@ class TradingBot:
                     "lowest_price": self.position.lowest_price,
                 }
 
+            # ── Recent trades ──
             recent = []
             for t in self.risk_manager.get_recent_trades(20):
                 recent.append({
@@ -894,6 +858,7 @@ class TradingBot:
                     "exit_time": t.exit_time,
                 })
 
+            # ── Daily stats ──
             all_trades_today = self.risk_manager.get_recent_trades(100)
             winning = sum(1 for t in all_trades_today if t.pnl_usdt > 0)
             total_t = self.risk_manager.trades_today
@@ -907,6 +872,7 @@ class TradingBot:
                 "is_locked": self.risk_manager._is_locked if hasattr(self.risk_manager, "_is_locked") else False,
             }
 
+            # ── Assemble state ──
             state = {
                 "current_price": self.current_price,
                 "price_change_pct": price_change_pct,
@@ -923,24 +889,26 @@ class TradingBot:
                 "cycle_count": self.cycle_count,
                 "paused": self.paused,
                 "daily_locked": self.risk_manager._is_locked if hasattr(self.risk_manager, "_is_locked") else False,
-                "paper_trading": self.cfg.paper_trading,
                 "position": pos_data,
                 "bb_result": bb_data,
                 "signal": signal.signal,
                 "signal_reason": signal.reason,
-                "signal_distance": signal.near_distance_pct,
-                "nearest_trade_direction": nearest["direction"],
-                "nearest_trade_band": "UPPER" if nearest["direction"] == "SHORT" else ("LOWER" if nearest["direction"] == "LONG" else ""),
-                "nearest_trade_distance_pct": nearest["distance_pct"],
-                "nearest_trade_trigger_price": nearest["trigger_price"],
+                "squeeze_active": signal.squeeze_active,
+                "squeeze_width": signal.squeeze_width,
+                "squeeze_min": signal.squeeze_min,
+                "highest_10": signal.highest_10,
+                "lowest_5": signal.lowest_5,
+                "candle_close": signal.candle_close,
+                "candle_time": str(signal.candle_time),
                 "bb_period": self.cfg.strategy.bb_period,
                 "bb_stddev": self.cfg.strategy.bb_stddev,
                 "candle_tf": self.cfg.strategy.candle_tf,
-                "near_threshold": self.cfg.strategy.near_threshold * 100,
-                "trail_pct": self.cfg.strategy.trail_pct * 100,
+                "squeeze_lookback": self.cfg.strategy.squeeze_lookback,
+                "breakout_lookback": self.cfg.strategy.breakout_lookback,
+                "trailing_lookback": self.cfg.strategy.trailing_lookback,
+                "limit_order_timeout": self.cfg.strategy.limit_order_timeout,
                 "poll_interval": self.cfg.poll_interval_sec,
                 "short_enabled": self.cfg.strategy.short_enabled,
-                "trailing_stop_enabled": self.cfg.strategy.trailing_stop_enabled,
                 "in_session": self._is_in_trading_session(),
                 "session_hours": [
                     f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}"
@@ -999,9 +967,8 @@ class TradingBot:
                 if signal.signal != "NONE":
                     self.display.print_signal_detected(signal.signal, signal.reason)
                     self.execute_entry(signal)
-                elif self.cycle_count % 30 == 1:
+                elif self.cycle_count % 5 == 1:  # log every 5 cycles in session
                     logger.info(f"[Cycle {self.cycle_count}] No signal: {signal.reason}")
-                    logger.info(f"  Price: ${self.current_price:.2f} | BB U: {signal.bb.upper:.2f} L: {signal.bb.lower:.2f} SMA: {signal.bb.sma:.2f}")
             elif self.position is None and not in_session:
                 if self.cycle_count % 60 == 1:
                     now = datetime.now(IST)
@@ -1015,8 +982,6 @@ class TradingBot:
         balances = self.fetch_balances()
 
         # Flatten nested balances for the display table.
-        # Internal format:  {"USDT": {"free": 123.45, "total": 123.45}, ...}
-        # Display expects:   {"USDT": 123.45, ...}
         display_balances: Dict[str, float] = {}
         for asset, val in balances.items():
             if isinstance(val, dict):
@@ -1030,25 +995,6 @@ class TradingBot:
         # Get latest signal info
         signal = self.strategy.detect_entry_signal()
 
-        # ── Nearest trade prediction ──
-        nearest_trade_direction = ""
-        nearest_trade_distance_pct = 0.0
-        nearest_trade_trigger_price = 0.0
-
-        if self.current_bb and self.current_bb.sma > 0 and self.current_price > 0:
-            bb = self.current_bb
-            dist_to_upper = abs(self.current_price - bb.upper)
-            dist_to_lower = abs(self.current_price - bb.lower)
-
-            if dist_to_upper <= dist_to_lower:
-                nearest_trade_direction = "SHORT"
-                nearest_trade_trigger_price = bb.upper
-                nearest_trade_distance_pct = dist_to_upper / self.current_price * 100
-            else:
-                nearest_trade_direction = "LONG"
-                nearest_trade_trigger_price = bb.lower
-                nearest_trade_distance_pct = dist_to_lower / self.current_price * 100
-
         self.display.update_data(
             current_price=self.current_price,
             balance=display_balances,
@@ -1056,14 +1002,14 @@ class TradingBot:
             bb_result=self.current_bb,
             signal=signal.signal,
             signal_reason=signal.reason,
-            last_signal_distance=signal.near_distance_pct,
-            nearest_trade_direction=nearest_trade_direction,
-            nearest_trade_distance_pct=nearest_trade_distance_pct,
-            nearest_trade_trigger_price=nearest_trade_trigger_price,
+            last_signal_distance=0.0,
+            nearest_trade_direction="",
+            nearest_trade_distance_pct=0.0,
+            nearest_trade_trigger_price=0.0,
             bot_status="RUNNING" if self.running else "STOPPING",
             cycle_count=self.cycle_count,
             last_error=self.last_error,
-            paper_trading=self.cfg.paper_trading,
+            paper_trading=False,
             risk_manager=self.risk_manager,
             recent_trades=recent_trades,
         )
@@ -1076,23 +1022,24 @@ class TradingBot:
     def run(self):
         """Main bot loop."""
         logger.info("=" * 60)
-        logger.info("🚀 BOLLINGER BAND REVERSAL BOT STARTING")
+        logger.info("🚀 BB SQUEEZE BREAKOUT BOT STARTING (LIVE)")
         logger.info("=" * 60)
         logger.info(f"Exchange: SharkEx v1")
         logger.info(f"Symbol: {self.cfg.exchange.symbol}")
         logger.info(f"Timeframe: {self.cfg.strategy.candle_tf}")
-        logger.info(f"Paper Trading: {self.cfg.paper_trading}")
         logger.info(f"Trade Size: ₹{self.cfg.risk.trade_size_inr:,.0f}")
         logger.info(f"Max Daily Loss: ₹{self.cfg.risk.max_daily_loss_inr:,.0f}")
         logger.info(f"Max Trades/Day: {self.cfg.risk.max_trades_per_day}")
         logger.info(f"Poll Interval: {self.cfg.poll_interval_sec}s")
-        logger.info(f"BB Period: {self.cfg.strategy.bb_period} | "
-                    f"StdDev: {self.cfg.strategy.bb_stddev} | "
-                    f"Near: {self.cfg.strategy.near_threshold*100:.1f}% | "
-                    f"Trail: {self.cfg.strategy.trail_pct*100:.1f}%")
-        logger.info(f"Candles Window: {self.cfg.strategy.candles_window}")
+        logger.info(
+            f"BB: ({self.cfg.strategy.bb_period},{self.cfg.strategy.bb_stddev}) | "
+            f"Squeeze: {self.cfg.strategy.squeeze_lookback} | "
+            f"Breakout: {self.cfg.strategy.breakout_lookback} | "
+            f"Trail: {self.cfg.strategy.trailing_lookback}"
+        )
+        logger.info(f"Limit Order Timeout: {self.cfg.strategy.limit_order_timeout}s")
         logger.info(f"SHORT Signals: {'ON' if self.cfg.strategy.short_enabled else 'OFF (LONG only)'}")
-        logger.info(f"Trailing Stop: {'ON' if self.cfg.strategy.trailing_stop_enabled else 'OFF (TP-only)'}")
+        logger.info(f"Data Window: {self.cfg.strategy.data_window} candles")
         logger.info(f"Sessions (IST): " + ", ".join(
             f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}" for sh, sm, eh, em in SESSION_HOURS
         ))
@@ -1190,7 +1137,7 @@ class TradingBot:
     def print_cli_header(self):
         """Print a one-time header for logging mode."""
         print("\n" + "=" * 70)
-        print("   🤖 BOLLINGER BAND REVERSAL BOT - LIVE")
+        print("   🤖 BB SQUEEZE BREAKOUT BOT — LIVE")
         print("=" * 70)
         print(f"   Exchange: SharkEx v1 | "
               f"Symbol: {self.cfg.exchange.symbol} | "
@@ -1210,11 +1157,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="5-Minute Bollinger Band Reversal Bot for SharkEx"
-    )
-    parser.add_argument(
-        "--paper", action="store_true",
-        help="Run in paper trading mode (no real orders)"
+        description="15-Minute BB Squeeze Breakout Bot for SharkEx (LIVE trading)"
     )
     parser.add_argument(
         "--config", type=str, default=None,
@@ -1241,8 +1184,6 @@ def main():
     setup_file_logging()
 
     # Load .env file into os.environ before reading config.
-    # find_dotenv() walks up from CWD looking for .env — the most robust
-    # approach.  Also tries __file__-relative as explicit fallback.
     from dotenv import load_dotenv, find_dotenv
 
     env_path = args.config or find_dotenv()
@@ -1271,15 +1212,10 @@ def main():
     else:
         cfg = BotConfig.interactive_setup()
 
-    # Override paper trading from CLI
-    if args.paper:
-        cfg.paper_trading = True
-
-    # Validate API keys
-    if not cfg.paper_trading and (not cfg.exchange.api_key or not cfg.exchange.api_secret):
+    # Live trading only — no paper mode
+    if not cfg.exchange.api_key or not cfg.exchange.api_secret:
         print("\n⚠️  ERROR: API key and secret are required for live trading!")
-        print("   Run with --paper for paper trading mode, or")
-        print("   set SHARKEX_API_KEY and SHARKEX_API_SECRET in .env")
+        print("   Set SHARKEX_API_KEY and SHARKEX_API_SECRET in .env")
         sys.exit(1)
 
     # Create bot

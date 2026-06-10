@@ -1,11 +1,11 @@
 """
-Configuration module - Pure SharkEx v1, 24/7 trading.
+Configuration module - BB Squeeze Breakout strategy on 15-min candles.
+Live spot trading on SharkEx v1. Session-based (IST windows).
+
 All config values are loaded from environment variables or set via interactive CLI.
-No session time restrictions.
 """
 
 import os
-import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -16,7 +16,7 @@ from typing import Optional
 
 @dataclass
 class StrategyConfig:
-    """Bollinger Band reversal strategy parameters."""
+    """Bollinger Squeeze Breakout strategy parameters (15-min candle)."""
 
     bb_period: int = 20
     """Number of candles for Bollinger Band calculation."""
@@ -24,32 +24,29 @@ class StrategyConfig:
     bb_stddev: float = 2.0
     """Standard deviation multiplier for Bollinger Bands."""
 
-    candle_index: int = -2
-    """Which closed candle to check for band touch (-2 = second-last closed)."""
+    candle_tf: str = "15m"
+    """Candle timeframe (always 15m for this strategy)."""
 
-    candle_tf: str = "5m"
-    """Candle timeframe (5m, 15m, 1h, etc.)."""
+    data_window: int = 120
+    """Number of candles to fetch for analysis (minimum bb_period + squeeze_lookback + 50)."""
 
-    data_window: int = 100
-    """Number of candles to fetch for analysis (minimum bb_period + 50)."""
-
-    display_window: int = 30
+    display_window: int = 40
     """Number of candles to show in display."""
 
-    near_threshold: float = 0.002
-    """How close candle close must be to band (0.002 = 0.2%)."""
+    squeeze_lookback: int = 10
+    """Number of candles for BB-width rolling minimum (squeeze detection)."""
 
-    short_enabled: bool = True
-    """Enable SHORT entry signals. Set False for LONG-only mode."""
+    breakout_lookback: int = 10
+    """Number of candles whose highest high the close must break for LONG entry."""
 
-    candles_window: int = 50
-    """Number of candles to fetch and use for BB analysis (passed to fetch_ohlcv)."""
+    trailing_lookback: int = 5
+    """Number of candles whose lowest low forms the trailing stop."""
 
-    trail_pct: float = 0.005
-    """Trailing stop percentage as decimal (0.005 = 0.5%)."""
+    limit_order_timeout: int = 10
+    """Seconds to wait for a limit order fill before falling back to market."""
 
-    trailing_stop_enabled: bool = True
-    """Enable trailing stop orders. When False, only take-profit exits are used."""
+    short_enabled: bool = False
+    """Enable SHORT entry signals. Set False for LONG-only spot trading."""
 
 
 # ===========================================================================
@@ -66,14 +63,11 @@ class RiskConfig:
     usd_inr_rate: float = 83.5
     """Reference USD/INR conversion rate."""
 
-    trail_pct: float = 0.5
-    """Trailing stop percentage (0.5 = 0.5%)."""
-
     max_daily_trades: int = 30
-    """Maximum trades per day."""
+    """Maximum trades (entries) allowed per calendar day."""
 
     max_daily_loss_inr: float = 3000.0
-    """Maximum daily loss in INR. Bot stops trading when daily PnL hits this."""
+    """Maximum daily loss in INR. Bot stops entering new trades when this is hit."""
 
     @property
     def max_daily_loss_pct(self) -> float:
@@ -109,8 +103,8 @@ class ExchangeConfig:
     contract_name: str = "BTCINR"
     """SharkEx contract name for leverage/margin calls (e.g. BTCINR)."""
 
-    leverage: int = 10
-    """Leverage multiplier for futures positions."""
+    leverage: int = 1
+    """Leverage multiplier (1x = spot)."""
 
     order_book_depth: int = 5
     """Order book depth for price checks."""
@@ -145,29 +139,33 @@ class BotConfig:
     def from_env(cls) -> "BotConfig":
         """Create config from environment variables (no interactive prompts)."""
         config = cls()
+
+        # -- exchange --------------------------------------------------------
         config.exchange.api_key = os.getenv("SHARKEX_API_KEY", "")
         config.exchange.api_secret = os.getenv("SHARKEX_API_SECRET", "")
         config.exchange.symbol = os.getenv("TRADING_SYMBOL", "BTC/USDT")
         config.exchange.contract_name = os.getenv("CONTRACT_NAME", "BTCINR")
-        config.exchange.leverage = int(os.getenv("LEVERAGE", "10"))
+        config.exchange.leverage = int(os.getenv("LEVERAGE", "1"))
 
+        # -- strategy --------------------------------------------------------
         config.strategy.bb_period = int(os.getenv("BB_PERIOD", "20"))
         config.strategy.bb_stddev = float(os.getenv("BB_STDDEV", "2.0"))
-        config.strategy.candle_tf = os.getenv("CANDLE_TF", "5m")
-        config.strategy.data_window = int(os.getenv("DATA_WINDOW", "100"))
-        config.strategy.display_window = int(os.getenv("DISPLAY_WINDOW", "30"))
-        config.strategy.near_threshold = float(os.getenv("NEAR_THRESHOLD", "0.002"))
+        config.strategy.candle_tf = os.getenv("CANDLE_TF", "15m")
+        config.strategy.data_window = int(os.getenv("DATA_WINDOW", "120"))
+        config.strategy.display_window = int(os.getenv("DISPLAY_WINDOW", "40"))
+        config.strategy.squeeze_lookback = int(os.getenv("SQUEEZE_LOOKBACK", "10"))
+        config.strategy.breakout_lookback = int(os.getenv("BREAKOUT_LOOKBACK", "10"))
+        config.strategy.trailing_lookback = int(os.getenv("TRAILING_LOOKBACK", "5"))
+        config.strategy.limit_order_timeout = int(os.getenv("LIMIT_ORDER_TIMEOUT", "10"))
         config.strategy.short_enabled = os.getenv("SHORT_ENABLED", "false").lower() in ("1", "true", "yes")
-        config.strategy.candles_window = int(os.getenv("CANDLES_WINDOW", "50"))
-        config.strategy.trail_pct = float(os.getenv("TRAIL_PCT", "0.005"))
-        config.strategy.trailing_stop_enabled = os.getenv("TRAILING_STOP_ENABLED", "true").lower() in ("1", "true", "yes")
 
+        # -- risk ------------------------------------------------------------
         config.risk.trade_size_inr = float(os.getenv("TRADE_SIZE_INR", "20000"))
         config.risk.usd_inr_rate = float(os.getenv("USD_INR_RATE", "83.5"))
-        config.risk.trail_pct = float(os.getenv("TRAIL_PCT", "0.5"))
         config.risk.max_daily_trades = int(os.getenv("MAX_DAILY_TRADES", "30"))
         config.risk.max_daily_loss_inr = float(os.getenv("MAX_DAILY_LOSS_INR", "3000"))
 
+        # -- bot -------------------------------------------------------------
         config.poll_interval_sec = float(os.getenv("POLL_INTERVAL_SEC", "5"))
         config.log_level = os.getenv("LOG_LEVEL", "INFO")
         config.debug = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
@@ -205,9 +203,9 @@ class BotConfig:
             config.exchange.symbol = symbol.upper()
 
         print(f"\n  Exchange: SharkEx v1  |  Symbol: {config.exchange.symbol}")
-        print("  Strategy: Bollinger Band Reversal (BB 20, 2σ)")
-        print(f"  Trade Size: ₹{config.risk.trade_size_inr:,.0f}  |  Trail SL: {config.risk.trail_pct}%")
-        print(f"  Mode: Session-based (09:30-12:00, 13:00-15:30, 19:00-22:00 IST)")
+        print("  Strategy: BB Squeeze Breakout (15-min, BB 20/2σ, squeeze=10, breakout=10, trail=5)")
+        print(f"  Trade Size: ₹{config.risk.trade_size_inr:,.0f}  |  Leverage: {config.exchange.leverage}x (spot)")
+        print("  Mode: Session-based (09:30-12:00, 13:00-15:30, 19:00-22:00 IST)")
         print(f"  SHORT signals: {'ON' if config.strategy.short_enabled else 'OFF (LONG only)'}")
         print("=" * 60 + "\n")
 

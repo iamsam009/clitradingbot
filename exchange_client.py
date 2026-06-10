@@ -560,6 +560,37 @@ class SharkExClient:
 
         return self._parse_order_response(resp, side)
 
+    def create_limit_order(self, side: str, quantity: float, price: float) -> Optional[Order]:
+        """
+        POST /v1/order/place-order  (authenticated)
+
+        Place a LIMIT order at the specified price.
+
+        Body: { placeType, quantity, side, symbol, type, price }
+        """
+        params = {
+            "placeType": "order_type",
+            "quantity": str(quantity),
+            "side": side.upper(),
+            "symbol": self._market_symbol,
+            "type": "LIMIT",
+            "price": str(price),
+        }
+
+        resp = self._request(
+            "POST",
+            "/v1/order/place-order",
+            params=params,
+            authenticated=True,
+        )
+
+        if "error" in resp:
+            logger.error(f"Failed to create LIMIT order: {resp.get('message')}")
+            return None
+
+        logger.info("Limit order placed: %s %s @ %.4f", side, quantity, price)
+        return self._parse_order_response(resp, side)
+
     def create_stop_order(
         self, side: str, quantity: float, stop_price: float
     ) -> Optional[Order]:

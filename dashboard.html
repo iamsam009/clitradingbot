@@ -532,6 +532,7 @@
     <span style="color:var(--text-dim);font-size:11px" id="leverageLabel">10x</span>
     <span class="price-ticker" id="priceTicker">--</span>
     <span class="price-change" id="priceChange">--</span>
+    <span style="color:var(--text-dim);font-size:11px" id="sessionLabel">Session: --</span>
     <span style="color:var(--text-dim);font-size:11px" id="cycleCount">Cycle: 0</span>
     <span style="color:var(--text-dim);font-size:11px;margin-left:auto" id="clockLabel">--</span>
   </div>
@@ -599,24 +600,30 @@
       </div>
     </div>
 
-    <!-- SIGNAL & NEAREST TRADE -->
+    <!-- SQUEEZE & BREAKOUT SIGNAL -->
     <div class="card">
-      <div class="card-header"><span class="dot dot-yellow pulse"></span> Signal & Nearest Trade</div>
+      <div class="card-header"><span class="dot dot-yellow pulse"></span> Squeeze & Breakout Signal</div>
       <div class="card-body" id="signalBody">
         <div class="info-row"><span class="info-label">Current Signal</span><span class="info-value"
             id="signalVal">NONE</span></div>
         <div class="info-row"><span class="info-label">Signal Reason</span><span class="info-value" id="signalReason"
             style="font-size:11px">--</span></div>
-        <div class="info-row"><span class="info-label">Signal Distance</span><span class="info-value"
-            id="signalDist">--</span></div>
         <div style="border-top:1px solid var(--border);margin:10px 0"></div>
-        <div
-          style="font-size:11px;color:var(--text-dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">
-          ⏱️ Nearest Trade Prediction</div>
-        <div class="prediction-box" id="predictionBox">
-          <div class="pred-direction" style="color:var(--text-muted)">--</div>
-          <div class="pred-detail">Waiting for data...</div>
-        </div>
+        <div class="info-row"><span class="info-label">🔹 Squeeze Active</span><span class="info-value"
+            id="squeezeActive">--</span></div>
+        <div class="info-row"><span class="info-label">Squeeze Width</span><span class="info-value"
+            id="squeezeWidth">--</span></div>
+        <div class="info-row"><span class="info-label">Squeeze Min (10-candle)</span><span class="info-value"
+            id="squeezeMin">--</span></div>
+        <div style="border-top:1px solid var(--border);margin:10px 0"></div>
+        <div class="info-row"><span class="info-label">Highest (10 candles)</span><span class="info-value val-green"
+            id="highest10">--</span></div>
+        <div class="info-row"><span class="info-label">Lowest (5 candles)</span><span class="info-value val-red"
+            id="lowest5">--</span></div>
+        <div class="info-row"><span class="info-label">Last Candle Close</span><span class="info-value"
+            id="candleClose">--</span></div>
+        <div class="info-row"><span class="info-label">Candle Time</span><span class="info-value" id="candleTime"
+            style="font-size:11px">--</span></div>
       </div>
     </div>
 
@@ -629,11 +636,15 @@
         <div class="info-row"><span class="info-label">BB StdDev</span><span class="info-value"
             id="cfgBBStdDev">2.0</span></div>
         <div class="info-row"><span class="info-label">Candle Timeframe</span><span class="info-value"
-            id="cfgCandleTF">5m</span></div>
-        <div class="info-row"><span class="info-label">Near Threshold</span><span class="info-value"
-            id="cfgNearThresh">0.50%</span></div>
-        <div class="info-row"><span class="info-label">Trail Stop %</span><span class="info-value"
-            id="cfgTrailPct">0.50%</span></div>
+            id="cfgCandleTF">15m</span></div>
+        <div class="info-row"><span class="info-label">Squeeze Lookback</span><span class="info-value"
+            id="cfgSqueezeLookback">10</span></div>
+        <div class="info-row"><span class="info-label">Breakout Lookback</span><span class="info-value"
+            id="cfgBreakoutLookback">10</span></div>
+        <div class="info-row"><span class="info-label">Trailing Lookback</span><span class="info-value"
+            id="cfgTrailingLookback">5</span></div>
+        <div class="info-row"><span class="info-label">Limit Order Timeout</span><span class="info-value"
+            id="cfgLimitTimeout">10s</span></div>
         <div class="info-row"><span class="info-label">Poll Interval</span><span class="info-value"
             id="cfgPollInt">5.0s</span></div>
       </div>
@@ -738,17 +749,31 @@
             </div>
           </div>
           <div>
-            <label>Near Threshold (%)</label>
+            <label>Squeeze Lookback</label>
             <div class="input-group">
-              <input type="number" id="setNearThreshold" placeholder="0.5" step="0.1" min="0.1" max="10">
-              <button onclick="saveSetting('near_threshold', 'setNearThreshold')">Save</button>
+              <input type="number" id="setSqueezeLookback" placeholder="10" step="1" min="5" max="50">
+              <button onclick="saveSetting('squeeze_lookback', 'setSqueezeLookback')">Save</button>
             </div>
           </div>
           <div>
-            <label>Trail Stop (%)</label>
+            <label>Breakout Lookback</label>
             <div class="input-group">
-              <input type="number" id="setTrailPct" placeholder="0.5" step="0.1" min="0.1" max="5">
-              <button onclick="saveSetting('trail_pct', 'setTrailPct')">Save</button>
+              <input type="number" id="setBreakoutLookback" placeholder="10" step="1" min="5" max="50">
+              <button onclick="saveSetting('breakout_lookback', 'setBreakoutLookback')">Save</button>
+            </div>
+          </div>
+          <div>
+            <label>Trailing Lookback</label>
+            <div class="input-group">
+              <input type="number" id="setTrailingLookback" placeholder="5" step="1" min="2" max="20">
+              <button onclick="saveSetting('trailing_lookback', 'setTrailingLookback')">Save</button>
+            </div>
+          </div>
+          <div>
+            <label>Limit Order Timeout (s)</label>
+            <div class="input-group">
+              <input type="number" id="setLimitTimeout" placeholder="10" step="1" min="3" max="60">
+              <button onclick="saveSetting('limit_order_timeout', 'setLimitTimeout')">Save</button>
             </div>
           </div>
           <div>
@@ -874,34 +899,6 @@
       $('bbLabelUpper').style.right = (pctPrice > 90 ? '2px' : 'auto');
     }
 
-    // ── Update nearest trade prediction ──
-    function updatePrediction(data) {
-      const box = $('predictionBox');
-      const dir = data.nearest_trade_direction || '';
-      const band = data.nearest_trade_band || '';
-      const triggerPrice = data.nearest_trade_trigger_price;
-      const distance = data.nearest_trade_distance_pct;
-
-      if (!dir) {
-        box.innerHTML = '<div class="pred-direction" style="color:var(--text-muted)">--</div><div class="pred-detail">No prediction available</div>';
-        return;
-      }
-
-      const isLong = dir === 'LONG';
-      const dirColor = isLong ? 'var(--green)' : 'var(--red)';
-      const emoji = isLong ? '🟢' : '🔴';
-      const directionLabel = isLong ? 'LONG' : 'SHORT';
-
-      box.innerHTML = `
-    <div class="pred-direction" style="color:${dirColor}">${emoji} ${directionLabel}</div>
-    <div class="pred-detail">
-      Nearest band: <strong>${band}</strong> &nbsp;|&nbsp;
-      Trigger: <strong>${fmtUSD(triggerPrice)}</strong> &nbsp;|&nbsp;
-      Distance: <strong>${fmtPct(distance)}</strong>
-    </div>
-  `;
-    }
-
     // ── MAIN POLL ──
     let lastTradeCount = 0;
     let lastLogHash = '';
@@ -928,6 +925,17 @@
         const now = new Date();
         $('clockLabel').textContent = now.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
+        // Session indicator
+        const sessionEl = $('sessionLabel');
+        if (d.in_session) {
+          sessionEl.textContent = '🟢 Session: LIVE';
+          sessionEl.style.color = 'var(--green)';
+        } else {
+          const sh = d.session_hours || ['09:30-12:00', '13:00-15:30', '19:00-22:00'];
+          sessionEl.textContent = '🔴 Session: OFF (' + sh.join(', ') + ')';
+          sessionEl.style.color = 'var(--text-dim)';
+        }
+
         // Status badges
         const statusB = $('statusBadge');
         const paperB = $('paperBadge');
@@ -941,7 +949,7 @@
           statusB.textContent = '● LIVE'; statusB.className = 'badge badge-live pulse';
           lockB.style.display = 'none';
         }
-        paperB.style.display = d.paper_trading ? 'inline-block' : 'none';
+        paperB.style.display = 'none';
 
         // ── Price & Balance ──
         $('lastPrice').textContent = fmtUSD(d.current_price);
@@ -998,17 +1006,31 @@
         else if (signal === 'SHORT') { sigEl.className = 'info-value val-red'; }
         else { sigEl.className = 'info-value'; }
         $('signalReason').textContent = d.signal_reason || '--';
-        $('signalDist').textContent = fmtPct(d.signal_distance);
 
-        // ── Nearest Trade Prediction ──
-        updatePrediction(d);
+        // ── Squeeze & Breakout fields ──
+        const squeezeAct = $('squeezeActive');
+        if (d.squeeze_active) {
+          squeezeAct.textContent = '✅ YES';
+          squeezeAct.className = 'info-value val-green';
+        } else {
+          squeezeAct.textContent = '❌ NO';
+          squeezeAct.className = 'info-value val-red';
+        }
+        $('squeezeWidth').textContent = fmtUSD(d.squeeze_width);
+        $('squeezeMin').textContent = fmtUSD(d.squeeze_min);
+        $('highest10').textContent = fmtUSD(d.highest_10);
+        $('lowest5').textContent = fmtUSD(d.lowest_5);
+        $('candleClose').textContent = fmtUSD(d.candle_close);
+        $('candleTime').textContent = d.candle_time || '--';
 
         // ── Strategy Config ──
         $('cfgBBPeriod').textContent = d.bb_period || 20;
         $('cfgBBStdDev').textContent = d.bb_stddev || 2.0;
-        $('cfgCandleTF').textContent = d.candle_tf || '5m';
-        $('cfgNearThresh').textContent = fmtPct(d.near_threshold || 0.5);
-        $('cfgTrailPct').textContent = fmtPct(d.trail_pct || 0.5);
+        $('cfgCandleTF').textContent = d.candle_tf || '15m';
+        $('cfgSqueezeLookback').textContent = d.squeeze_lookback || 10;
+        $('cfgBreakoutLookback').textContent = d.breakout_lookback || 10;
+        $('cfgTrailingLookback').textContent = d.trailing_lookback || 5;
+        $('cfgLimitTimeout').textContent = (d.limit_order_timeout || 10) + 's';
         $('cfgPollInt').textContent = (d.poll_interval || 5.0).toFixed(1) + 's';
 
         // ── Pre-populate settings form with current live values ──
@@ -1018,8 +1040,10 @@
         $('setContract').value = d.contract_name || '';
         $('setBBPeriod').value = d.bb_period || '';
         $('setBBStdDev').value = d.bb_stddev || '';
-        $('setNearThreshold').value = d.near_threshold != null ? d.near_threshold : '';
-        $('setTrailPct').value = d.trail_pct != null ? d.trail_pct : '';
+        $('setSqueezeLookback').value = d.squeeze_lookback != null ? d.squeeze_lookback : '';
+        $('setBreakoutLookback').value = d.breakout_lookback != null ? d.breakout_lookback : '';
+        $('setTrailingLookback').value = d.trailing_lookback != null ? d.trailing_lookback : '';
+        $('setLimitTimeout').value = d.limit_order_timeout != null ? d.limit_order_timeout : '';
         $('setPollInterval').value = d.poll_interval || '';
 
         // ── Daily P&L ──
