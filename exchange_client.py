@@ -420,18 +420,24 @@ class SharkExClient:
         """
         GET /v1/wallet/futures-wallet/details  (authenticated)
 
-        SharkEx returns a flat wallet-level object.  Example (INR):
-          {"inrBalance":"1941.50", "walletBalance":"1941.50", "marginBalance":..., ...}
+        SharkEx returns a flat wallet-level object whose keys depend on the
+        margin asset.  Examples:
 
-        When the margin asset is USDT the keys become usdtBalance,
-        walletBalance, etc.  We extract USDT free/total from the flat
-        response and default everything else to zero.
+          marginAsset=INR  → {"inrBalance":"1941.50", "walletBalance":"1941.50", ...}
+          marginAsset=USDT → {"usdtBalance":"123.45", "walletBalance":"123.45", ...}
+
+        We pass ``marginAsset=USDT`` so the API returns USDT-denominated
+        balances.  Only per-asset ``*Balance`` keys are extracted (e.g.
+        ``usdtBalance``, ``btcBalance``); utility keys like
+        ``walletBalance``, ``marginBalance``, ``lockedBalance`` etc. are
+        ignored.
 
         Returns dict like {"USDT": {"free": 123.45, "total": 123.45}, ...}
         """
         resp = self._request(
             "GET",
             "/v1/wallet/futures-wallet/details",
+            params={"marginAsset": "USDT"},
             authenticated=True,
         )
 
@@ -445,24 +451,24 @@ class SharkExClient:
             logger.warning(f"Unexpected futures-wallet response type: {type(resp)}")
             return {"USDT": {"free": 0, "total": 0}}
 
-        # Try USDT-margin field names first, then INR fallback.
-        # 'walletBalance' is always the total; the per-asset balance uses the
-        # lowercase asset code (e.g. 'usdtBalance' or 'inrBalance').
-        usdt_free = float(
-            wallet.get("usdtBalance")
-            or wallet.get("availableBalance")
-            or 0
-        )
+        # Per-asset balance keys we care about.  Wallet-level summary keys
+        # like walletBalance / marginBalance / lockedBalance / … are NOT
+        # per-asset and must not be treated as balance entries.
+        ASSET_KEYS = frozenset({
+            "usdtBalance", "inrBalance", "btcBalance", "ethBalance",
+        })
+
+        usdt_free = float(wallet.get("usdtBalance") or 0)
         total = float(wallet.get("walletBalance", 0))
 
         balances: Dict[str, Dict[str, float]] = {}
         balances["USDT"] = {"free": usdt_free, "total": total}
 
-        # Also expose any other scalar asset balances the response carries.
+        # Expose any other scalar per-asset balances the response carries.
         for key, val in wallet.items():
-            if isinstance(val, (int, float, str)) and key.endswith("Balance"):
-                # e.g. "inrBalance", "btcBalance"
-                asset = key[:-7].upper()  # "inrBalance" → "INR"
+            if key in ASSET_KEYS and isinstance(val, (int, float, str)):
+                # "usdtBalance" → "USDT", "btcBalance" → "BTC"
+                asset = key[:-7].upper()
                 if asset not in balances:
                     balances[asset] = {"free": float(val), "total": float(val)}
 
