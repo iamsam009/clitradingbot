@@ -157,7 +157,7 @@ class BotConfig:
         config.strategy.data_window = int(os.getenv("DATA_WINDOW", "100"))
         config.strategy.display_window = int(os.getenv("DISPLAY_WINDOW", "30"))
         config.strategy.near_threshold = float(os.getenv("NEAR_THRESHOLD", "0.002"))
-        config.strategy.short_enabled = os.getenv("SHORT_ENABLED", "true").lower() in ("1", "true", "yes")
+        config.strategy.short_enabled = os.getenv("SHORT_ENABLED", "false").lower() in ("1", "true", "yes")
         config.strategy.candles_window = int(os.getenv("CANDLES_WINDOW", "50"))
         config.strategy.trail_pct = float(os.getenv("TRAIL_PCT", "0.005"))
         config.strategy.trailing_stop_enabled = os.getenv("TRAILING_STOP_ENABLED", "true").lower() in ("1", "true", "yes")
