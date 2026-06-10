@@ -323,13 +323,24 @@ class SharkExClient:
         )
 
     def fetch_current_price(self) -> float:
-        """Return the latest 'lastPrice' from the 24hr ticker."""
+        """Return the latest price from the 24hr ticker.
+
+        SharkEx wraps the response in {"data": {...}} where the
+        current price field is 'c' (Binance-style compact format).
+        """
         try:
             ticker = self.fetch_ticker()
             if "error" in ticker:
                 logger.error(f"Failed to fetch price: {ticker.get('message')}")
                 return 0.0
-            price = ticker.get("lastPrice", 0)
+
+            # SharkEx nests the actual ticker inside a "data" envelope:
+            #   {"data": {"c": "5271387.66", "h": ..., "l": ..., ...}}
+            data = ticker.get("data", ticker)
+
+            # Try SharkEx field first ('c' = last/current price), then
+            # fall back to 'lastPrice' for Binance-style responses
+            price = data.get("c") or data.get("lastPrice", 0)
             return float(price)
         except Exception as e:
             logger.error(f"Error fetching current price: {e}")
@@ -406,13 +417,20 @@ class SharkExClient:
 
     def fetch_balance(self) -> dict:
         """
-        GET /v1/exchange/futures-wallet-details  (authenticated)
+        GET /v1/wallet/futures-wallet/details  (authenticated)
+
+        SharkEx returns a flat wallet-level object.  Example (INR):
+          {"inrBalance":"1941.50", "walletBalance":"1941.50", "marginBalance":..., ...}
+
+        When the margin asset is USDT the keys become usdtBalance,
+        walletBalance, etc.  We extract USDT free/total from the flat
+        response and default everything else to zero.
 
         Returns dict like {"USDT": {"free": 123.45, "total": 123.45}, ...}
         """
         resp = self._request(
             "GET",
-            "/v1/exchange/futures-wallet-details",
+            "/v1/wallet/futures-wallet/details",
             authenticated=True,
         )
 
@@ -420,33 +438,32 @@ class SharkExClient:
             logger.error(f"Failed to fetch balance: {resp.get('message')}")
             return {"USDT": {"free": 0, "total": 0}}
 
+        # The response may be wrapped in {"data": {...}} or be bare.
+        wallet = resp.get("data", resp)
+        if not isinstance(wallet, dict):
+            logger.warning(f"Unexpected futures-wallet response type: {type(resp)}")
+            return {"USDT": {"free": 0, "total": 0}}
+
+        # Try USDT-margin field names first, then INR fallback.
+        # 'walletBalance' is always the total; the per-asset balance uses the
+        # lowercase asset code (e.g. 'usdtBalance' or 'inrBalance').
+        usdt_free = float(
+            wallet.get("usdtBalance")
+            or wallet.get("availableBalance")
+            or 0
+        )
+        total = float(wallet.get("walletBalance", 0))
+
         balances: Dict[str, Dict[str, float]] = {}
+        balances["USDT"] = {"free": usdt_free, "total": total}
 
-        # Response structure per docs: { "data": [{ coin, balance, availableBalance, ... }, ...] }
-        wallet_data = resp.get("data", [])
-        if isinstance(wallet_data, list):
-            for coin in wallet_data:
-                if not isinstance(coin, dict):
-                    continue
-                currency = coin.get("coin", coin.get("asset", ""))
-                if not currency:
-                    continue
-                total = float(coin.get("balance", coin.get("walletBalance", 0)))
-                free = float(coin.get("availableBalance", coin.get("availableMargin", total)))
-                balances[currency] = {"free": free, "total": total}
-        elif isinstance(resp, dict):
-            # Try to parse whatever format the API returned
-            for key, val in resp.items():
-                if isinstance(val, dict) and "balance" in val:
-                    balances[key] = {
-                        "free": float(val.get("availableBalance", val.get("free", 0))),
-                        "total": float(val.get("balance", val.get("total", 0))),
-                    }
-                elif isinstance(val, (int, float)) and key.isupper():
-                    balances[key] = {"free": float(val), "total": float(val)}
-
-        if "USDT" not in balances:
-            balances["USDT"] = {"free": 0, "total": 0}
+        # Also expose any other scalar asset balances the response carries.
+        for key, val in wallet.items():
+            if isinstance(val, (int, float, str)) and key.endswith("Balance"):
+                # e.g. "inrBalance", "btcBalance"
+                asset = key[:-7].upper()  # "inrBalance" → "INR"
+                if asset not in balances:
+                    balances[asset] = {"free": float(val), "total": float(val)}
 
         return balances
 

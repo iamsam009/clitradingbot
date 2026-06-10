@@ -597,6 +597,16 @@ class TradingBot:
         """Prepare data and push to the CLI display."""
         balances = self.fetch_balances()
 
+        # Flatten nested balances for the display table.
+        # Internal format:  {"USDT": {"free": 123.45, "total": 123.45}, ...}
+        # Display expects:   {"USDT": 123.45, ...}
+        display_balances: Dict[str, float] = {}
+        for asset, val in balances.items():
+            if isinstance(val, dict):
+                display_balances[asset] = float(val.get("free", 0))
+            elif isinstance(val, (int, float)):
+                display_balances[asset] = float(val)
+
         # Get recent trades
         recent_trades = self.risk_manager.get_recent_trades(20)
 
@@ -605,7 +615,7 @@ class TradingBot:
 
         self.display.update_data(
             current_price=self.current_price,
-            balance=balances,
+            balance=display_balances,
             position=self.position,
             bb_result=self.current_bb,
             signal=signal.signal,
