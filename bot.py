@@ -19,9 +19,11 @@ import sys
 import time
 import signal
 import logging
+import logging.handlers
 import traceback
+import atexit
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import pytz
 
@@ -43,6 +45,96 @@ import web_api
 logger = logging.getLogger("bot")
 
 IST = pytz.timezone("Asia/Kolkata")
+
+# ─── Daemon PID File ───
+PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.pid")
+
+
+def daemonize():
+    """Double-fork to detach from the controlling terminal (Unix daemon)."""
+    # First fork — detach from parent
+    try:
+        pid = os.fork()
+        if pid > 0:
+            sys.exit(0)  # Parent exits
+    except OSError as e:
+        sys.stderr.write(f"First fork failed: {e}\n")
+        sys.exit(1)
+
+    # Decouple from parent environment
+    os.chdir("/")
+    os.setsid()
+    os.umask(0o027)
+
+    # Second fork — relinquish session leadership
+    try:
+        pid = os.fork()
+        if pid > 0:
+            sys.exit(0)
+    except OSError as e:
+        sys.stderr.write(f"Second fork failed: {e}\n")
+        sys.exit(1)
+
+    # Redirect standard file descriptors to /dev/null
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, sys.stdin.fileno())
+    os.dup2(devnull, sys.stdout.fileno())
+    os.dup2(devnull, sys.stderr.fileno())
+    os.close(devnull)
+
+    # Write PID file
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+    # Clean up PID file on exit
+    atexit.register(lambda: os.path.exists(PID_FILE) and os.remove(PID_FILE))
+
+
+def setup_file_logging(log_dir: str = None):
+    """Configure rotating file handlers for persistent logging."""
+    if log_dir is None:
+        log_dir = os.path.dirname(os.path.abspath(__file__))
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    fmt = logging.Formatter(
+        "[%(asctime)s] [%(levelname)-7s] [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # General log — all levels
+    general = logging.handlers.RotatingFileHandler(
+        os.path.join(log_dir, "bot.log"),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+    )
+    general.setLevel(logging.INFO)
+    general.setFormatter(fmt)
+    root_logger.addHandler(general)
+
+    # Error log — WARNING and above
+    error = logging.handlers.RotatingFileHandler(
+        os.path.join(log_dir, "bot_error.log"),
+        maxBytes=2 * 1024 * 1024,
+        backupCount=3,
+    )
+    error.setLevel(logging.WARNING)
+    error.setFormatter(fmt)
+    root_logger.addHandler(error)
+
+    # Trade log — trade-specific events
+    trade = logging.handlers.RotatingFileHandler(
+        os.path.join(log_dir, "bot_trades.log"),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+    )
+    trade.setLevel(logging.INFO)
+    trade.setFormatter(fmt)
+    trade.addFilter(lambda record: record.name == "bot.trade")
+    root_logger.addHandler(trade)
+
+    logger.info("File logging initialized — bot.log, bot_error.log, bot_trades.log")
 
 
 # =============================================================================
@@ -71,6 +163,10 @@ class TradingBot:
         self.paused: bool = False
         self.last_error: str = ""
 
+        # Web log buffer (circular, max 200 entries)
+        self.web_logs: List[Dict[str, str]] = []
+        self._trade_logger = logging.getLogger("bot.trade")
+
         # Paper trading
         self.paper_balance: Dict[str, float] = {"USDT": 10000.0, "BTC": 0.0}
         self.paper_entry_price: float = 0.0
@@ -87,6 +183,18 @@ class TradingBot:
         """Handle graceful shutdown."""
         logger.info(f"\nSignal {signum} received. Shutting down gracefully...")
         self.running = False
+
+    def _add_web_log(self, msg: str, cls: str = ""):
+        """Add a log entry to the web dashboard circular buffer."""
+        now = datetime.now(IST)
+        entry = {
+            "time": now.strftime("%H:%M:%S"),
+            "msg": msg,
+            "cls": cls,
+        }
+        self.web_logs.append(entry)
+        if len(self.web_logs) > 200:
+            self.web_logs = self.web_logs[-200:]
 
     def _round_quantity(self, quantity: float) -> float:
         """Round quantity to appropriate precision for the exchange.
@@ -245,6 +353,8 @@ class TradingBot:
                 signal.signal, entry_price, quantity, trade_usdt, self.cfg.risk.trade_size_inr
             )
             logger.info(f"📝 PAPER {signal.signal} @ ${entry_price:.2f} | Qty: {quantity:.6f} BTC")
+            self._add_web_log(f"📝 PAPER {signal.signal} @ ${entry_price:.2f} | Qty: {quantity:.6f}", "log-entry")
+            self._trade_logger.info(f"PAPER {signal.signal} | Entry: ${entry_price:.2f} | Qty: {quantity:.6f}")
             return True
         else:
             # Real exchange execution
@@ -280,6 +390,10 @@ class TradingBot:
                 signal.signal, avg_price, actual_filled,
                 self.position.usdt_invested, self.position.inr_invested
             )
+
+            logger.info(f"✅ {signal.signal} @ ${avg_price:.2f} | Qty: {actual_filled:.6f}")
+            self._add_web_log(f"✅ ENTRY {signal.signal} @ ${avg_price:.2f} | Qty: {actual_filled:.6f}", "log-entry")
+            self._trade_logger.info(f"ENTRY {signal.signal} | Price: ${avg_price:.2f} | Qty: {actual_filled:.6f}")
 
             return True
 
@@ -448,6 +562,12 @@ class TradingBot:
                 reason,
             )
 
+            pnl_inr = pnl_usdt * self.cfg.risk.usd_inr_rate
+            pnl_cls = "log-profit" if pnl_usdt >= 0 else "log-loss"
+            logger.info(f"📝 PAPER EXIT {reason} | P&L: ${pnl_usdt:+.2f} (₹{pnl_inr:+.2f})")
+            self._add_web_log(f"📝 PAPER EXIT [{reason}] P&L: ${pnl_usdt:+.2f}", pnl_cls)
+            self._trade_logger.info(f"PAPER EXIT {reason} | P&L: ${pnl_usdt:+.2f} | ₹{pnl_inr:+.2f}")
+
             self.position = None
             self.paper_entry_price = 0.0
             self.paper_quantity = 0.0
@@ -495,9 +615,16 @@ class TradingBot:
                 pnl_usdt * self.cfg.risk.usd_inr_rate,
                 reason,
             )
+
+            pnl_inr = pnl_usdt * self.cfg.risk.usd_inr_rate
+            pnl_cls = "log-profit" if pnl_usdt >= 0 else "log-loss"
+            logger.info(f"✅ EXIT [{reason}] @ ${exit_price:.2f} | P&L: ${pnl_usdt:+.2f} (₹{pnl_inr:+.2f})")
+            self._add_web_log(f"✅ EXIT [{reason}] P&L: ${pnl_usdt:+.2f}", pnl_cls)
+            self._trade_logger.info(f"EXIT {reason} | Price: ${exit_price:.2f} | P&L: ${pnl_usdt:+.2f} | ₹{pnl_inr:+.2f}")
         else:
             logger.error("Failed to close position! Manual intervention may be required.")
             self.display.print_error("Failed to close position - check exchange!")
+            self._add_web_log("❌ Failed to close position!", "log-error")
 
         self.position = None
 
@@ -785,6 +912,7 @@ class TradingBot:
                 "last_error": self.last_error,
                 "contract_name": self.cfg.exchange.contract_name,
                 "max_trades_per_day": self.cfg.risk.max_trades_per_day,
+                "logs": list(self.web_logs[-50:]),  # Last 50 log entries for web
             }
 
             web_api.update_state(state)
@@ -1038,7 +1166,21 @@ def main():
         "--no-interactive", action="store_true",
         help="Skip interactive setup, use .env or defaults"
     )
+    parser.add_argument(
+        "--daemon", action="store_true",
+        help="Run as a background daemon process (Unix only)"
+    )
     args = parser.parse_args()
+
+    # Daemonize before any heavy init (Unix only)
+    if args.daemon:
+        if sys.platform == "win32":
+            sys.stderr.write("--daemon is not supported on Windows\n")
+            sys.exit(1)
+        daemonize()
+
+    # Setup file-based logging (always on in production)
+    setup_file_logging()
 
     # Load .env file into os.environ before reading config.
     # find_dotenv() walks up from CWD looking for .env — the most robust

@@ -261,7 +261,6 @@
       font-family: var(--mono);
       font-size: 10px;
       color: var(--text-dim);
-      transform: translateX(-50%);
     }
 
     .bb-bar .sma-line {
@@ -533,8 +532,8 @@
     <span style="color:var(--text-dim);font-size:11px" id="leverageLabel">10x</span>
     <span class="price-ticker" id="priceTicker">--</span>
     <span class="price-change" id="priceChange">--</span>
-    <span style="color:var(--text-dim);font-size:11px;margin-left:auto" id="cycleCount">Cycle: 0</span>
-    <span style="color:var(--text-dim);font-size:11px" id="clockLabel">--</span>
+    <span style="color:var(--text-dim);font-size:11px" id="cycleCount">Cycle: 0</span>
+    <span style="color:var(--text-dim);font-size:11px;margin-left:auto" id="clockLabel">--</span>
   </div>
 
   <!-- ============================================================
@@ -1012,6 +1011,17 @@
         $('cfgTrailPct').textContent = fmtPct(d.trail_pct || 0.5);
         $('cfgPollInt').textContent = (d.poll_interval || 5.0).toFixed(1) + 's';
 
+        // ── Pre-populate settings form with current live values ──
+        $('setTradeSize').value = d.trade_size_inr || '';
+        $('setLeverage').value = d.leverage || '';
+        $('setSymbol').value = d.symbol || 'BTC/USDT';
+        $('setContract').value = d.contract_name || '';
+        $('setBBPeriod').value = d.bb_period || '';
+        $('setBBStdDev').value = d.bb_stddev || '';
+        $('setNearThreshold').value = d.near_threshold != null ? d.near_threshold : '';
+        $('setTrailPct').value = d.trail_pct != null ? d.trail_pct : '';
+        $('setPollInterval').value = d.poll_interval || '';
+
         // ── Daily P&L ──
         const stats = d.daily_stats || {};
         $('pnlTradesToday').textContent = stats.total_trades || 0;
@@ -1065,10 +1075,10 @@
           addLog(fmtTimeShort(Date.now() / 1000), '⚠️ ' + d.last_error, 'log-error');
         }
 
-        // Mark flash on cycle change
+        // Mark flash on cycle change — flash only the header, not the whole page
         if (d.cycle_count !== prevCycle) {
-          document.body.classList.add('flash-updated');
-          setTimeout(() => document.body.classList.remove('flash-updated'), 400);
+          $('header').classList.add('flash-updated');
+          setTimeout(() => $('header').classList.remove('flash-updated'), 400);
           prevCycle = d.cycle_count;
         }
 

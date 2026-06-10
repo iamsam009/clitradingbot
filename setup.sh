@@ -142,13 +142,12 @@ start_bot() {
     # Clear stale Python bytecode cache to ensure code changes take effect
     find "$SCRIPT_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
-    # Start bot with nohup, redirect output to log file
+    # Start bot as a daemon — bot handles its own PID file and logging
     # PYTHONDONTWRITEBYTECODE=1 prevents future .pyc cache issues
-    nohup env PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/bot.py" --no-interactive >> "$LOG_FILE" 2>&1 &
-    BOT_PID=$!
-    echo $BOT_PID > "$PID_FILE"
-
+    env PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/bot.py" --no-interactive --daemon &
+    # Wait for daemon to fork and write PID file
     sleep 2
+    BOT_PID=$(cat "$PID_FILE" 2>/dev/null || echo "")
 
     if kill -0 $BOT_PID 2>/dev/null; then
         echo -e "  ${GREEN}✔ Bot started successfully!${NC}"
@@ -270,10 +269,9 @@ case "${1:-}" in
         source "$SCRIPT_DIR/venv/bin/activate"
         # Clear stale bytecode cache before restart
         find "$SCRIPT_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-        nohup env PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/bot.py" --no-interactive >> "$LOG_FILE" 2>&1 &
-        echo $! > "$PID_FILE"
+        env PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/bot.py" --no-interactive --daemon &
         sleep 2
-        echo -e "${GREEN}✔ Bot restarted (PID: $(cat $PID_FILE))${NC}"
+        echo -e "${GREEN}✔ Bot restarted (PID: $(cat "$PID_FILE" 2>/dev/null || echo 'N/A'))${NC}"
         echo ""
         tail -n 20 "$LOG_FILE"
         ;;
