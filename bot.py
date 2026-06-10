@@ -49,6 +49,13 @@ IST = pytz.timezone("Asia/Kolkata")
 # ─── Daemon PID File ───
 PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.pid")
 
+# Trading session windows in IST (Asia/Kolkata), 3 sessions per day
+SESSION_HOURS: List[tuple] = [
+    (9, 30, 12, 0),    # 09:30 - 12:00 IST
+    (13, 0, 15, 30),   # 13:00 - 15:30 IST
+    (19, 0, 22, 0),    # 19:00 - 22:00 IST
+]
+
 
 def daemonize():
     """Double-fork to detach from the controlling terminal (Unix daemon)."""
@@ -144,7 +151,8 @@ def setup_file_logging(log_dir: str = None):
 class TradingBot:
     """
     Main bot class that orchestrates the entire trading system.
-    Runs 24/7 — no session time restrictions.
+    Trades during 3 IST sessions: 09:30-12:00, 13:00-15:30, 19:00-22:00.
+    Exits and data fetching run 24/7.
     """
 
     def __init__(self, cfg: BotConfig):
@@ -195,6 +203,18 @@ class TradingBot:
         self.web_logs.append(entry)
         if len(self.web_logs) > 200:
             self.web_logs = self.web_logs[-200:]
+
+    @staticmethod
+    def _is_in_trading_session() -> bool:
+        """Check if current IST time falls within any trading session window."""
+        now = datetime.now(IST)
+        minutes = now.hour * 60 + now.minute
+        for start_h, start_m, end_h, end_m in SESSION_HOURS:
+            start = start_h * 60 + start_m
+            end = end_h * 60 + end_m
+            if start <= minutes < end:
+                return True
+        return False
 
     def _round_quantity(self, quantity: float) -> float:
         """Round quantity to appropriate precision for the exchange.
@@ -778,6 +798,10 @@ class TradingBot:
                 self.cfg.strategy.trail_pct = float(value) / 100.0
                 self.strategy = BollingerBandStrategy(self.cfg.strategy)
                 logger.info(f"[Web] trail_pct = {value}%")
+            elif key == "short_enabled":
+                self.cfg.strategy.short_enabled = value if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes")
+                self.strategy = BollingerBandStrategy(self.cfg.strategy)
+                logger.info(f"[Web] short_enabled = {self.cfg.strategy.short_enabled}")
             elif key == "poll_interval":
                 self.cfg.poll_interval_sec = float(value)
                 logger.info(f"[Web] poll_interval = {value}s")
@@ -907,6 +931,12 @@ class TradingBot:
                 "near_threshold": self.cfg.strategy.near_threshold * 100,
                 "trail_pct": self.cfg.strategy.trail_pct * 100,
                 "poll_interval": self.cfg.poll_interval_sec,
+                "short_enabled": self.cfg.strategy.short_enabled,
+                "in_session": self._is_in_trading_session(),
+                "session_hours": [
+                    f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}"
+                    for sh, sm, eh, em in SESSION_HOURS
+                ],
                 "daily_stats": daily,
                 "recent_trades": recent,
                 "last_error": self.last_error,
@@ -923,10 +953,10 @@ class TradingBot:
 
     def run_cycle(self):
         """
-        Execute one complete cycle of the bot (24/7):
+        Execute one complete cycle of the bot:
         1. Fetch data
         2. Check exit conditions (unless paused)
-        3. Detect and execute entry signals (unless paused)
+        3. Detect and execute entry signals (unless paused, only during trading sessions)
         4. Update display
         """
         self.cycle_count += 1
@@ -944,12 +974,13 @@ class TradingBot:
 
         # 3. TRADING LOGIC — skip if paused
         if not self.paused:
-            # Check exit conditions (always)
+            # Check exit conditions (always, even outside sessions)
             if self.position:
                 self.check_and_execute_exit()
 
-            # Entry logic (24/7 — no session restrictions)
-            if self.position is None:
+            # Entry logic — only during trading sessions
+            in_session = self._is_in_trading_session()
+            if self.position is None and in_session:
                 signal = self.strategy.detect_entry_signal()
                 if signal.signal != "NONE":
                     self.display.print_signal_detected(signal.signal, signal.reason)
@@ -1038,6 +1069,10 @@ class TradingBot:
                     f"StdDev: {self.cfg.strategy.bb_stddev} | "
                     f"Near: {self.cfg.strategy.near_threshold*100:.1f}% | "
                     f"Trail: {self.cfg.strategy.trail_pct*100:.1f}%")
+        logger.info(f"SHORT Signals: {'ON' if self.cfg.strategy.short_enabled else 'OFF (LONG only)'}")
+        logger.info(f"Sessions (IST): " + ", ".join(
+            f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}" for sh, sm, eh, em in SESSION_HOURS
+        ))
         logger.info("=" * 60)
 
         # Start live display

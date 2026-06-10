@@ -214,7 +214,7 @@ class BollingerBandStrategy:
                     )
 
         # ---- SHORT SIGNAL ----
-        if close < open_p:  # Red candle
+        if self.cfg.short_enabled and close < open_p:  # Red candle + SHORT enabled
             if close < upper:  # Close is below upper band
                 # Calculate how close: (upper - close) / close
                 distance_pct = (upper - close) / close

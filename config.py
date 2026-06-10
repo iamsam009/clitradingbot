@@ -36,8 +36,14 @@ class StrategyConfig:
     display_window: int = 30
     """Number of candles to show in display."""
 
-    near_threshold: float = 0.005
-    """How close candle close must be to band (0.005 = 0.5%)."""
+    near_threshold: float = 0.002
+    """How close candle close must be to band (0.002 = 0.2%)."""
+
+    short_enabled: bool = True
+    """Enable SHORT entry signals. Set False for LONG-only mode."""
+
+    candles_window: int = 50
+    """Number of candles to check for BB analysis."""
 
     trail_pct: float = 0.005
     """Trailing stop percentage as decimal (0.005 = 0.5%)."""
@@ -54,22 +60,22 @@ class RiskConfig:
     trade_size_inr: float = 20000.0
     """Notional trade size in INR."""
 
-    usd_inr_rate: float = 87.0
+    usd_inr_rate: float = 83.5
     """Reference USD/INR conversion rate."""
 
     trail_pct: float = 0.5
     """Trailing stop percentage (0.5 = 0.5%)."""
 
-    max_daily_trades: int = 10
+    max_daily_trades: int = 30
     """Maximum trades per day."""
 
-    max_daily_loss_pct: float = 5.0
-    """Stop if daily loss exceeds this % of trade capital."""
+    max_daily_loss_inr: float = 3000.0
+    """Maximum daily loss in INR. Bot stops trading when daily PnL hits this."""
 
     @property
-    def max_daily_loss_inr(self) -> float:
-        """Maximum daily loss in INR."""
-        return self.trade_size_inr * (self.max_daily_loss_pct / 100)
+    def max_daily_loss_pct(self) -> float:
+        """Maximum daily loss as % of trade capital (computed)."""
+        return (self.max_daily_loss_inr / self.trade_size_inr) * 100 if self.trade_size_inr else 0.0
 
     @property
     def max_trades_per_day(self) -> int:
@@ -147,14 +153,16 @@ class BotConfig:
         config.strategy.candle_tf = os.getenv("CANDLE_TF", "5m")
         config.strategy.data_window = int(os.getenv("DATA_WINDOW", "100"))
         config.strategy.display_window = int(os.getenv("DISPLAY_WINDOW", "30"))
-        config.strategy.near_threshold = float(os.getenv("NEAR_THRESHOLD", "0.005"))
-        config.strategy.trail_pct = float(os.getenv("STRATEGY_TRAIL_PCT", "0.005"))
+        config.strategy.near_threshold = float(os.getenv("NEAR_THRESHOLD", "0.002"))
+        config.strategy.short_enabled = os.getenv("SHORT_ENABLED", "true").lower() in ("1", "true", "yes")
+        config.strategy.candles_window = int(os.getenv("CANDLES_WINDOW", "50"))
+        config.strategy.trail_pct = float(os.getenv("TRAIL_PCT", "0.005"))
 
         config.risk.trade_size_inr = float(os.getenv("TRADE_SIZE_INR", "20000"))
-        config.risk.usd_inr_rate = float(os.getenv("USD_INR_RATE", "87"))
+        config.risk.usd_inr_rate = float(os.getenv("USD_INR_RATE", "83.5"))
         config.risk.trail_pct = float(os.getenv("TRAIL_PCT", "0.5"))
-        config.risk.max_daily_trades = int(os.getenv("MAX_DAILY_TRADES", "10"))
-        config.risk.max_daily_loss_pct = float(os.getenv("MAX_DAILY_LOSS_PCT", "5"))
+        config.risk.max_daily_trades = int(os.getenv("MAX_DAILY_TRADES", "30"))
+        config.risk.max_daily_loss_inr = float(os.getenv("MAX_DAILY_LOSS_INR", "3000"))
 
         config.poll_interval_sec = float(os.getenv("POLL_INTERVAL_SEC", "5"))
         config.log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -195,7 +203,8 @@ class BotConfig:
         print(f"\n  Exchange: SharkEx v1  |  Symbol: {config.exchange.symbol}")
         print("  Strategy: Bollinger Band Reversal (BB 20, 2σ)")
         print(f"  Trade Size: ₹{config.risk.trade_size_inr:,.0f}  |  Trail SL: {config.risk.trail_pct}%")
-        print(f"  Mode: 24/7 — no session time restrictions")
+        print(f"  Mode: Session-based (09:30-12:00, 13:00-15:30, 19:00-22:00 IST)")
+        print(f"  SHORT signals: {'ON' if config.strategy.short_enabled else 'OFF (LONG only)'}")
         print("=" * 60 + "\n")
 
         return config
