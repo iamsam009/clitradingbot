@@ -120,7 +120,7 @@ class BollingerBandStrategy:
             columns=["timestamp", "open", "high", "low", "close", "volume"],
         )
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Calcutta")
+        df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Kolkata")
         df.set_index("timestamp", inplace=True)
         df.sort_index(inplace=True)
 

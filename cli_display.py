@@ -204,14 +204,14 @@ MENU_ENTRIES: List[MenuEntry] = [
       lambda cfg: str(cfg.strategy.bb_stddev),
       lambda cfg: f"{cfg.strategy.bb_stddev:.1f}",
       lambda cfg, v: setattr(cfg.strategy, 'bb_stddev', float(v))),
-    ("3", "Near Threshold %",    "strategy.near_threshold",
-     lambda cfg: str(cfg.strategy.near_threshold * 100),
-     lambda cfg: f"{cfg.strategy.near_threshold * 100:.1f}%",
-     lambda cfg, v: setattr(cfg.strategy, 'near_threshold', float(v) / 100.0)),
-    ("4", "Trail Stop %",        "strategy.trail_pct",
-     lambda cfg: str(cfg.strategy.trail_pct * 100),
-     lambda cfg: f"{cfg.strategy.trail_pct * 100:.1f}%",
-     lambda cfg, v: setattr(cfg.strategy, 'trail_pct', float(v) / 100.0)),
+    ("3", "Squeeze Lookback",    "strategy.squeeze_lookback",
+     lambda cfg: str(cfg.strategy.squeeze_lookback),
+     lambda cfg: f"{cfg.strategy.squeeze_lookback} candles",
+     lambda cfg, v: setattr(cfg.strategy, 'squeeze_lookback', int(v))),
+    ("4", "Breakout Lookback",   "strategy.breakout_lookback",
+     lambda cfg: str(cfg.strategy.breakout_lookback),
+     lambda cfg: f"{cfg.strategy.breakout_lookback} candles",
+     lambda cfg, v: setattr(cfg.strategy, 'breakout_lookback', int(v))),
     # Risk
     ("5", "Trade Size (₹)",      "risk.trade_size_inr",
      lambda cfg: str(cfg.risk.trade_size_inr),
@@ -976,20 +976,21 @@ class CLIDisplay:
             lines = [
                 f"  BB Period:        {st.bb_period}",
                 f"  BB Std Dev:       {st.bb_stddev}",
-                f"  Near Threshold:   {st.near_threshold*100:.1f}%",
-                f"  Trail Stop:       {st.trail_pct*100:.1f}%",
+                f"  Squeeze LB:       {st.squeeze_lookback} candles",
+                f"  Breakout LB:      {st.breakout_lookback} candles",
+                f"  Trailing LB:      {st.trailing_lookback} candles",
                 f"  Trade Size:       ₹{rk.trade_size_inr:,.0f}",
                 f"  USD/INR Rate:     ₹{rk.usd_inr_rate}",
                 f"  Max Daily Loss:   ₹{rk.max_daily_loss_inr:,.0f}",
                 f"  Max Trades/Day:   {rk.max_trades_per_day}",
                 f"  Poll Interval:    {self.cfg.poll_interval_sec}s",
                 f"  Exchange:         SharkEx v1",
-                f"  Strategy:         24/7 BB Reversal",
+                f"  Strategy:         15m BB Squeeze Breakout",
             ]
         else:
             # Compact: 3 columns of small items
             lines = [
-                f"BB({st.bb_period},{st.bb_stddev}σ)  Near:{st.near_threshold*100:.1f}%  Trail:{st.trail_pct*100:.1f}%",
+                f"BB({st.bb_period},{st.bb_stddev}σ)  SqzLB:{st.squeeze_lookback}  BrkLB:{st.breakout_lookback}  TrlLB:{st.trailing_lookback}",
                 f"Trade: ₹{rk.trade_size_inr:,.0f}  USD/INR: ₹{rk.usd_inr_rate}  MaxLoss: ₹{rk.max_daily_loss_inr:,.0f}",
                 f"Max {rk.max_trades_per_day}/day  Poll: {self.cfg.poll_interval_sec}s  SharkEx v1",
             ]
