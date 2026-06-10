@@ -5,17 +5,21 @@ Renders a clean, responsive trading dashboard that automatically adjusts
 to terminal width.  On wide terminals (≥100 cols) panels are side-by-side;
 on narrow terminals they stack vertically for perfect readability over SSH.
 
+Uses Rich ``Live`` for flicker-free in-place updates — no screen clearing,
+no flicker, no overlapping logs during menu editing.
+
 Hotkeys (anytime):
-  [M]  - Open settings menu
+  [M]  - Open settings menu (freezes dashboard, suppresses log noise)
   [P]  - Pause / Resume bot trading
   [H]  - Show help overlay (3s)
 
 Menu hotkeys (when settings menu is open):
-  [1-9] - Select a setting to edit
-  [Enter] - Confirm new value
+  [0-9, L] - Select a setting to edit
+  [Enter]  - Confirm new value
   [Backspace] - Delete last character / go back
-  [Esc/Q] - Close menu and return to dashboard
-  [R]     - Reset daily stats
+  [Esc/Q]  - Close menu and return to dashboard
+  [R]      - Reset daily stats
+  [P]      - Pause/Resume
 """
 
 import os
@@ -36,6 +40,7 @@ from rich.layout import Layout
 from rich.text import Text
 from rich.align import Align
 from rich.columns import Columns
+from rich.live import Live
 from rich import box
 
 from config import BotConfig
@@ -270,6 +275,10 @@ class CLIDisplay:
         self._menu_msg_time: float = 0.0
         self._help_overlay_until: float = 0.0
 
+        # ── Live display engine (flicker-free in-place updates) ──
+        self._live: Optional[Live] = None
+        self._dirty: bool = False  # set True when keystroke needs immediate render
+
         # ── Data holders (updated by bot each cycle) ──
         self.current_price: float = 0.0
         self.prev_price: float = 0.0
@@ -331,20 +340,48 @@ class CLIDisplay:
     # ─── Display Lifecycle ───────────────────────────────────────────────
 
     def start_live_display(self):
-        """Start the live display and keyboard listener."""
+        """Start the live display (flicker-free in-place rendering) and keyboard
+        listener.  ``Live`` overwrites the same terminal region on each update
+        so there is no blank-flash and no log/display overlap."""
         self._keyboard.start()
-        self.console.clear()
-        self.console.print(self._generate_layout())
+        layout = self._generate_layout()
+        self._live = Live(
+            layout,
+            console=self.console,
+            refresh_per_second=20,
+            transient=False,
+            screen=False,
+            vertical_overflow="visible",
+        )
+        self._live.start(refresh=True)
 
     def stop_live_display(self):
         """Stop the live display and keyboard listener."""
         self._keyboard.stop()
+        if self._live:
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+            self._live = None
 
     def refresh(self):
-        """Full repaint — clear screen + atomic render."""
+        """Render the current layout in-place (no clear → no flicker)."""
         self._process_keystrokes()
-        self.console.clear()
-        self.console.print(self._generate_layout())
+        if self._live:
+            try:
+                self._live.update(self._generate_layout(), refresh=True)
+            except Exception:
+                pass  # Live may have been stopped during shutdown
+
+    def _render_now(self):
+        """Force an immediate in-place re-render (used mid-cycle for
+        keystroke echo during menu input)."""
+        if self._live:
+            try:
+                self._live.update(self._generate_layout(), refresh=True)
+            except Exception:
+                pass
 
     def tick(self):
         """Lightweight tick: process keystrokes only, no render."""
@@ -353,6 +390,12 @@ class CLIDisplay:
     def shutdown(self):
         """Full cleanup."""
         self._keyboard.stop()
+        if self._live:
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+            self._live = None
 
     # ─── Keyboard / Interaction Handling — UNCHANGED ────────────────────
 
@@ -362,6 +405,10 @@ class CLIDisplay:
             return
         for key in keys:
             self._handle_key(key)
+        # During menu input mode, re-render immediately so keystrokes
+        # appear on screen without waiting for the next bot cycle.
+        if self._menu_mode:
+            self._render_now()
 
     def _handle_key(self, key: str):
         # ── Global hotkeys ──
@@ -1177,13 +1224,17 @@ class CLIDisplay:
     # ─── Static Print Methods ────────────────────────────────────────────
 
     def print_status_line(self, msg: str, style: str = "white"):
-        """Print a single status line."""
+        """Print a single status line (suppressed during menu mode)."""
+        if self._menu_mode:
+            return  # Don't pollute the menu screen with log lines
         timestamp = datetime.now(IST).strftime("%H:%M:%S")
         self.console.print(f"[dim]{timestamp}[/dim] {msg}", style=style)
 
     def print_trade_executed(self, side: str, entry: float, qty: float,
                              usdt_val: float, inr_val: float):
-        """Print trade execution details."""
+        """Print trade execution details (suppressed during menu mode)."""
+        if self._menu_mode:
+            return
         side_color = "bright_green" if side in ("BUY", "LONG") else "bright_red"
         side_emoji = "🟢" if side in ("BUY", "LONG") else "🔴"
         self.print_status_line(
@@ -1195,7 +1246,9 @@ class CLIDisplay:
 
     def print_trade_exit(self, side: str, exit_price: float, pnl_usdt: float,
                          pnl_inr: float, reason: str):
-        """Print trade exit details."""
+        """Print trade exit details (suppressed during menu mode)."""
+        if self._menu_mode:
+            return
         pnl_color = "bright_green" if pnl_usdt >= 0 else "bright_red"
         pnl_sign = "+" if pnl_usdt >= 0 else ""
         self.print_status_line(
@@ -1206,8 +1259,8 @@ class CLIDisplay:
         )
 
     def print_signal_detected(self, signal: str, reason: str):
-        """Print detected signal."""
-        if signal == "NONE":
+        """Print detected signal (suppressed during menu mode)."""
+        if signal == "NONE" or self._menu_mode:
             return
         color = "bright_green" if signal == "LONG" else "bright_red"
         emoji = "🟢" if signal == "LONG" else "🔴"
@@ -1217,5 +1270,7 @@ class CLIDisplay:
         )
 
     def print_error(self, error_msg: str):
-        """Print error message."""
+        """Print error message (suppressed during menu mode)."""
+        if self._menu_mode:
+            return
         self.print_status_line(f"⚠️ [bold red]ERROR:[/bold red] {error_msg}", style="red")
