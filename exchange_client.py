@@ -682,6 +682,33 @@ class SharkExClient:
         return True
 
     # =======================================================================
+    #  LEVERAGE
+    # =======================================================================
+
+    def set_leverage(self, leverage: int, contract_name: str) -> bool:
+        """Update leverage for a given contract via ``POST /v1/exchange/update/leverage``."""
+        if not contract_name:
+            logger.error("set_leverage: contract_name is required")
+            return False
+
+        params = {
+            "leverage": int(leverage),
+            "contractName": contract_name,
+            "timestamp": int(time.time() * 1000),
+        }
+        try:
+            resp = self._request("POST", "/v1/exchange/update/leverage", params, authenticated=True)
+            if resp.get("error"):
+                logger.error(f"set_leverage failed: {resp.get('message', resp)}")
+                return False
+            updated = resp.get("updatedLeverage", 0)
+            logger.info(f"Leverage set to {updated}x for {contract_name}")
+            return True
+        except Exception as e:
+            logger.error(f"set_leverage exception: {e}")
+            return False
+
+    # =======================================================================
     #  RESPONSE PARSING
     # =======================================================================
 

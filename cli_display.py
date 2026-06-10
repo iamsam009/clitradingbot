@@ -229,6 +229,15 @@ MENU_ENTRIES: List[MenuEntry] = [
       lambda cfg: str(cfg.poll_interval_sec),
       lambda cfg: f"{cfg.poll_interval_sec}s",
       lambda cfg, v: setattr(cfg, 'poll_interval_sec', int(v))),
+    # Exchange
+    ("0", "Trading Pair",        "exchange.symbol",
+      lambda cfg: str(cfg.exchange.symbol),
+      lambda cfg: f"{cfg.exchange.symbol}",
+      lambda cfg, v: setattr(cfg.exchange, 'symbol', v.upper())),
+    ("L", "Leverage",            "exchange.leverage",
+      lambda cfg: str(cfg.exchange.leverage),
+      lambda cfg: f"{cfg.exchange.leverage}x",
+      lambda cfg, v: setattr(cfg.exchange, 'leverage', int(v))),
 ]
 
 
@@ -277,6 +286,11 @@ class CLIDisplay:
         self.paused: bool = False
         self.risk_manager: Optional[RiskManager] = None
         self.recent_trades: List[TradeRecord] = []
+
+        # ── Nearest trade prediction ──
+        self.nearest_trade_direction: str = ""
+        self.nearest_trade_distance_pct: float = 0.0
+        self.nearest_trade_trigger_price: float = 0.0
 
     # ─── Terminal width helper ────────────────────────────────────────────
 
@@ -425,8 +439,9 @@ class CLIDisplay:
 
         # ── Main menu mode ──
         if self._menu_state == "main":
+            key_lower = key.lower()
             for entry_key, label, path, getter, fmt, parser in MENU_ENTRIES:
-                if key == entry_key:
+                if key_lower == entry_key.lower():
                     self._menu_state = "input"
                     self._menu_selected_key = entry_key
                     self._menu_input_buffer = getter(self.cfg)
@@ -548,7 +563,7 @@ class CLIDisplay:
         help_text.append("  [Ctrl+C]  Shutdown Bot   ", style="bold yellow")
         help_text.append("Graceful shutdown\n", style="dim")
         help_text.append("\n  📋  MENU COMMANDS (when menu is open):\n\n", style="bold bright_cyan")
-        help_text.append("  [1-9]  Select Setting    ", style="bold yellow")
+        help_text.append("  [0-9,L]  Select Setting  ", style="bold yellow")
         help_text.append("Edit a parameter\n", style="dim")
         help_text.append("  [Enter]  Confirm Input   ", style="bold yellow")
         help_text.append("Apply new value\n", style="dim")
@@ -614,10 +629,18 @@ class CLIDisplay:
             lines.append(f"    [{entry_key}]  {label:<22s} {current}")
 
         lines.append("")
-        lines.append("  ⏱️   OTHER")
+        lines.append("  🏦  EXCHANGE")
         lines.append("  " + "─" * 50)
 
-        for entry_key, label, path, getter, fmt, parser in MENU_ENTRIES[8:]:
+        for entry_key, label, path, getter, fmt, parser in MENU_ENTRIES[9:11]:
+            current = fmt(self.cfg)
+            lines.append(f"    [{entry_key}]  {label:<22s} {current}")
+
+        lines.append("")
+        lines.append("  ⏱️   POLLING")
+        lines.append("  " + "─" * 50)
+
+        for entry_key, label, path, getter, fmt, parser in MENU_ENTRIES[8:9]:
             current = fmt(self.cfg)
             lines.append(f"    [{entry_key}]  {label:<22s} {current}")
 
@@ -665,7 +688,7 @@ class CLIDisplay:
             text.append(" [Esc] Cancel  ", style="bold red on grey11")
             text.append(" [Backspace] Delete  ", style="bold yellow on grey11")
         else:
-            text.append(" [1-9] Edit Setting  ", style="bold cyan on grey11")
+            text.append(" [0-9,L] Edit Setting  ", style="bold cyan on grey11")
             text.append(" [P] Pause/Resume  ", style="bold yellow on grey11")
             text.append(" [R] Reset Daily  ", style="bold yellow on grey11")
             text.append(" [Q/Esc] Close Menu  ", style="bold red on grey11")
@@ -995,6 +1018,16 @@ class CLIDisplay:
             if self.signal_reason:
                 lines.append(f"  {self.signal_reason}")
 
+            # ── Nearest trade prediction (narrow) ──
+            if self.nearest_trade_trigger_price > 0 and self.nearest_trade_direction:
+                n_dir = self.nearest_trade_direction
+                n_emoji = "🟢" if n_dir == "LONG" else "🔴"
+                n_pct = self.nearest_trade_distance_pct
+                n_price = self.nearest_trade_trigger_price
+                lines.append(
+                    f"Next Trade: {n_emoji} {n_dir} @ ${n_price:,.2f} ({n_pct:.2f}%)"
+                )
+
             if self.bb_result and self.bb_result.sma > 0:
                 bb = self.bb_result
                 lines.append(
@@ -1023,6 +1056,19 @@ class CLIDisplay:
                          f"{self.last_signal_distance:.3f}%")
         if self.signal_reason:
             table.add_row("Reason", Text(self.signal_reason, style="dim"))
+
+        # ── Nearest trade prediction row ──
+        if self.nearest_trade_trigger_price > 0 and self.nearest_trade_direction:
+            n_dir = self.nearest_trade_direction
+            n_emoji = "🟢" if n_dir == "LONG" else "🔴"
+            n_color = "bold bright_green" if n_dir == "LONG" else "bold bright_red"
+            table.add_row("", "")
+            table.add_row("Next Trade",
+                         Text(
+                             f"{n_emoji} {n_dir} @ ${self.nearest_trade_trigger_price:,.2f} "
+                             f"({self.nearest_trade_distance_pct:.2f}%)",
+                             style=n_color,
+                         ))
 
         if self.bb_result and self.bb_result.sma > 0:
             bb = self.bb_result

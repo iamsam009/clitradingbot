@@ -95,7 +95,13 @@ class ExchangeConfig:
     """SharkEx API secret."""
 
     symbol: str = "BTC/USDT"
-    """Trading pair."""
+    """Trading pair (display format, e.g. BTC/USDT)."""
+
+    contract_name: str = "BTCINR"
+    """SharkEx contract name for leverage/margin calls (e.g. BTCINR)."""
+
+    leverage: int = 10
+    """Leverage multiplier for futures positions."""
 
     order_book_depth: int = 5
     """Order book depth for price checks."""
@@ -133,6 +139,8 @@ class BotConfig:
         config.exchange.api_key = os.getenv("SHARKEX_API_KEY", "")
         config.exchange.api_secret = os.getenv("SHARKEX_API_SECRET", "")
         config.exchange.symbol = os.getenv("TRADING_SYMBOL", "BTC/USDT")
+        config.exchange.contract_name = os.getenv("CONTRACT_NAME", "BTCINR")
+        config.exchange.leverage = int(os.getenv("LEVERAGE", "10"))
 
         config.strategy.bb_period = int(os.getenv("BB_PERIOD", "20"))
         config.strategy.bb_stddev = float(os.getenv("BB_STDDEV", "2.0"))

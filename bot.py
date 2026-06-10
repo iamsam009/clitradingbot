@@ -556,6 +556,29 @@ class TradingBot:
                     self.risk_manager._current_date = datetime.now(IST).strftime("%Y-%m-%d")
                     logger.info(f"   Risk manager rebuilt with new {label}")
 
+                # Handle exchange config changes
+                if config_path.startswith("exchange."):
+                    if config_path == "exchange.leverage":
+                        try:
+                            lev = int(value)
+                            contract = self.cfg.exchange.contract_name
+                            success = self.exchange.set_leverage(lev, contract)
+                            if success:
+                                logger.info(f"   Leverage updated to {lev}x for {contract}")
+                            else:
+                                logger.error(f"   Failed to update leverage to {lev}x")
+                        except Exception as e:
+                            logger.error(f"   Leverage update exception: {e}")
+                    elif config_path == "exchange.symbol":
+                        old_symbol = self.cfg.exchange.symbol
+                        self.cfg.exchange.symbol = value
+                        try:
+                            self.exchange = create_exchange_client(self.cfg)
+                            logger.info(f"   Exchange client rebuilt with symbol {value} (was {old_symbol})")
+                        except Exception as e:
+                            logger.error(f"   Failed to rebuild exchange client: {e}")
+                            self.cfg.exchange.symbol = old_symbol
+
                 # If strategy trail_pct changed, update existing position's trailing stop
                 if config_path == "strategy.trail_pct" and self.position:
                     if self.position.side == "LONG":
@@ -636,6 +659,25 @@ class TradingBot:
         # Get latest signal info
         signal = self.strategy.detect_entry_signal()
 
+        # ── Nearest trade prediction ──
+        nearest_trade_direction = ""
+        nearest_trade_distance_pct = 0.0
+        nearest_trade_trigger_price = 0.0
+
+        if self.current_bb and self.current_bb.sma > 0 and self.current_price > 0:
+            bb = self.current_bb
+            dist_to_upper = abs(self.current_price - bb.upper)
+            dist_to_lower = abs(self.current_price - bb.lower)
+
+            if dist_to_upper <= dist_to_lower:
+                nearest_trade_direction = "SHORT"
+                nearest_trade_trigger_price = bb.upper
+                nearest_trade_distance_pct = dist_to_upper / self.current_price * 100
+            else:
+                nearest_trade_direction = "LONG"
+                nearest_trade_trigger_price = bb.lower
+                nearest_trade_distance_pct = dist_to_lower / self.current_price * 100
+
         self.display.update_data(
             current_price=self.current_price,
             balance=display_balances,
@@ -644,6 +686,9 @@ class TradingBot:
             signal=signal.signal,
             signal_reason=signal.reason,
             last_signal_distance=signal.near_distance_pct,
+            nearest_trade_direction=nearest_trade_direction,
+            nearest_trade_distance_pct=nearest_trade_distance_pct,
+            nearest_trade_trigger_price=nearest_trade_trigger_price,
             bot_status="RUNNING" if self.running else "STOPPING",
             cycle_count=self.cycle_count,
             last_error=self.last_error,
