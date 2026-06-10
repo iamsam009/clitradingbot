@@ -98,7 +98,7 @@ def daemonize():
 
 
 def setup_file_logging(log_dir: str = None):
-    """Configure rotating file handlers for persistent logging."""
+    """Configure rotating file handlers + console handler for persistent logging."""
     if log_dir is None:
         log_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -108,6 +108,10 @@ def setup_file_logging(log_dir: str = None):
     fmt = logging.Formatter(
         "[%(asctime)s] [%(levelname)-7s] [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    # Simpler format for console (no timestamps — less noise in TUI mode)
+    console_fmt = logging.Formatter(
+        "[%(levelname)-7s] [%(name)s] %(message)s"
     )
 
     # General log — all levels
@@ -141,7 +145,13 @@ def setup_file_logging(log_dir: str = None):
     trade.addFilter(lambda record: record.name == "bot.trade")
     root_logger.addHandler(trade)
 
-    logger.info("File logging initialized — bot.log, bot_error.log, bot_trades.log")
+    # Console handler — INFO+ to stderr (visible even during Rich TUI)
+    console = logging.StreamHandler(sys.stderr)
+    console.setLevel(logging.INFO)
+    console.setFormatter(console_fmt)
+    root_logger.addHandler(console)
+
+    logger.info("Logging initialized — bot.log, bot_error.log, bot_trades.log, + console")
 
 
 # =============================================================================
@@ -1028,44 +1038,56 @@ class TradingBot:
 
     def run(self):
         """Main bot loop."""
-        logger.info("=" * 60)
-        logger.info("🚀 BB SQUEEZE BREAKOUT BOT STARTING (LIVE)")
-        logger.info("=" * 60)
-        logger.info(f"Exchange: SharkEx v1")
-        logger.info(f"Symbol: {self.cfg.exchange.symbol}")
-        logger.info(f"Timeframe: {self.cfg.strategy.candle_tf}")
-        logger.info(f"Trade Size: ₹{self.cfg.risk.trade_size_inr:,.0f}")
-        logger.info(f"Max Daily Loss: ₹{self.cfg.risk.max_daily_loss_inr:,.0f}")
-        logger.info(f"Max Trades/Day: {self.cfg.risk.max_trades_per_day}")
-        logger.info(f"Poll Interval: {self.cfg.poll_interval_sec}s")
-        logger.info(
+        # ── Build startup banner (also print raw so it's visible even if TUI hides logs) ──
+        banner_lines = [
+            "=" * 60,
+            "🚀 BB SQUEEZE BREAKOUT BOT STARTING (LIVE)",
+            "=" * 60,
+            f"Exchange: SharkEx v1",
+            f"Symbol: {self.cfg.exchange.symbol}",
+            f"Timeframe: {self.cfg.strategy.candle_tf}",
+            f"Trade Size: ₹{self.cfg.risk.trade_size_inr:,.0f}",
+            f"Max Daily Loss: ₹{self.cfg.risk.max_daily_loss_inr:,.0f}",
+            f"Max Trades/Day: {self.cfg.risk.max_trades_per_day}",
+            f"Poll Interval: {self.cfg.poll_interval_sec}s",
             f"BB: ({self.cfg.strategy.bb_period},{self.cfg.strategy.bb_stddev}) | "
             f"Squeeze: {self.cfg.strategy.squeeze_lookback} | "
             f"Breakout: {self.cfg.strategy.breakout_lookback} | "
-            f"Trail: {self.cfg.strategy.trailing_lookback}"
-        )
-        logger.info(f"Limit Order Timeout: {self.cfg.strategy.limit_order_timeout}s")
-        logger.info(f"SHORT Signals: {'ON' if self.cfg.strategy.short_enabled else 'OFF (LONG only)'}")
-        logger.info(f"Data Window: {self.cfg.strategy.data_window} candles")
-        logger.info(f"Sessions (IST): " + ", ".join(
-            f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}" for sh, sm, eh, em in SESSION_HOURS
-        ))
-        logger.info("=" * 60)
+            f"Trail: {self.cfg.strategy.trailing_lookback}",
+            f"Limit Order Timeout: {self.cfg.strategy.limit_order_timeout}s",
+            f"SHORT Signals: {'ON' if self.cfg.strategy.short_enabled else 'OFF (LONG only)'}",
+            f"Data Window: {self.cfg.strategy.data_window} candles",
+            f"Sessions (IST): " + ", ".join(
+                f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}" for sh, sm, eh, em in SESSION_HOURS
+            ),
+            "=" * 60,
+        ]
+        for line in banner_lines:
+            logger.info(line)
+            sys.stderr.write(line + "\n")
+        sys.stderr.flush()
 
-        # Start live display
+        # ═══ Start web API server FIRST (before TUI takes over the terminal) ═══
+        web_started = web_api.start_server(host="0.0.0.0", port=8080)
+        if web_started:
+            msg = "🌐 Web dashboard: http://0.0.0.0:8080"
+            logger.info(msg)
+            sys.stderr.write(msg + "\n")
+        else:
+            msg = "⚠️  WARNING: Web server failed to start on port 8080!"
+            logger.warning(msg)
+            sys.stderr.write(msg + "\n")
+        sys.stderr.flush()
+
+        # Start live display (Rich TUI — once this starts it takes over stdout/stderr)
         try:
             self.display.start_live_display()
         except Exception as e:
             logger.warning(f"Live display start failed: {e}. Running in log-only mode.")
 
-        # Start web API server
-        try:
-            web_api.start_server(host="0.0.0.0", port=8080)
-            logger.info("Web dashboard: http://0.0.0.0:8080")
-        except Exception as e:
-            logger.warning(f"Web server start failed: {e}")
-
         logger.info("Bot loop started. Press Ctrl+C to stop.")
+        sys.stderr.write("▶ Bot loop started. Press Ctrl+C to stop.\n")
+        sys.stderr.flush()
 
         while self.running:
             try:
